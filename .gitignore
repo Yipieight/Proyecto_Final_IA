@@ -1,0 +1,26 @@
+# Dataset (demasiado pesado para git)
+data/
+
+# Modelos entrenados
+models/*.pth
+models/*.pt
+
+# Métricas generadas
+metrics/
+
+# Entorno virtual
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# Jupyter checkpoints
+.ipynb_checkpoints/
+
+# macOS
+.DS_Store
+._*
+
+# Temporales
+*.log
+*.tmp
