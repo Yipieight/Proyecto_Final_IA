@@ -26,23 +26,25 @@ ROI_TOP_FRAC = 0.35
 # ── ESP32 — comunicación UDP ──────────────────────────────────────────────────
 # Actualizar ESP32_IP con la IP que aparece en el Serial Monitor al arrancar.
 # El Mac actúa como hotspot; el ESP32 se conecta a él.
-ESP32_IP    = "192.168.2.2"    # IP típica cuando el Mac es el hotspot
+ESP32_IP    = "192.168.1.7"    # IP típica cuando el Mac es el hotspot
 ESP32_PORT  = 9999             # puerto UDP — coincidir con el firmware del ESP32
 
 # ── Protocolo UDP (1 byte por comando) ────────────────────────────────────────
-CMD_STOP     = 0x00   # parar motores
-CMD_FORWARD  = 0x01   # avanzar recto  (RECTA)
-CMD_LEFT     = 0x02   # girar izquierda (CURVA_IZQ, GIRO_90_IZQ)
-CMD_RIGHT    = 0x03   # girar derecha   (CURVA_DER, GIRO_90_DER)
-CMD_T_CROSS  = 0x04   # giro post-pausa en CRUCE_T (izq o der elegido por SM)
+CMD_STOP       = 0x00   # parar motores
+CMD_FORWARD    = 0x01   # avanzar recto                    (RECTA)
+CMD_LEFT       = 0x02   # curva suave izquierda (diferencial: izq lento, der rápido)
+CMD_RIGHT      = 0x03   # curva suave derecha   (diferencial: izq rápido, der lento)
+CMD_GIRO_LEFT  = 0x04   # pivote 90° izquierda  (solo lado derecho activo)
+CMD_GIRO_RIGHT = 0x05   # pivote 90° derecha    (solo lado izquierdo activo)
 
 # Mapa byte → nombre legible (para el HUD)
 CMD_NAME = {
-    CMD_STOP:    "STOP",
-    CMD_FORWARD: "ADELANTE",
-    CMD_LEFT:    "IZQUIERDA",
-    CMD_RIGHT:   "DERECHA",
-    CMD_T_CROSS: "T_GIRO",
+    CMD_STOP:       "STOP",
+    CMD_FORWARD:    "ADELANTE",
+    CMD_LEFT:       "CURVA_IZQ",
+    CMD_RIGHT:      "CURVA_DER",
+    CMD_GIRO_LEFT:  "GIRO_IZQ",
+    CMD_GIRO_RIGHT: "GIRO_DER",
 }
 
 # ── Hiperparámetros de entrenamiento ──────────────────────────────────────────
