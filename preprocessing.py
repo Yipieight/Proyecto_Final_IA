@@ -115,14 +115,21 @@ def preprocess_frame(bgr: np.ndarray, use_edges: bool = False) -> np.ndarray:
 
     Returns:
         array float32 de forma (IMG_HEIGHT, IMG_WIDTH), valores en [0, 1]
+
+    Orden de operaciones optimizado para rendimiento:
+      grayscale → ROI → resize → blur/sobel manual
+    El filtro manual NumPy se aplica sobre la imagen 64×64 (4K píxeles) en lugar
+    de la imagen HD (≥5M píxeles), reduciendo el cómputo ~1500×. El blur tiene
+    además mayor impacto perceptual en la resolución reducida.
     """
     gray      = to_grayscale(bgr) / 255.0   # [0, 1]
     roi       = extract_roi(gray)
-    blurred   = gaussian_blur(roi, size=5, sigma=1.0)
 
-    processed = sobel_edges(blurred) if use_edges else blurred
+    # Resize ANTES del filtro manual — operación geométrica permitida
+    resized   = cv2.resize(roi, (IMG_WIDTH, IMG_HEIGHT),
+                           interpolation=cv2.INTER_LINEAR)
 
-    # cv2.resize está permitido para operaciones geométricas básicas
-    resized = cv2.resize(processed, (IMG_WIDTH, IMG_HEIGHT),
-                         interpolation=cv2.INTER_LINEAR)
-    return resized.astype(np.float32)
+    # Filtro crítico programado manualmente con NumPy (requisito del proyecto)
+    processed = sobel_edges(resized) if use_edges else gaussian_blur(resized, size=5, sigma=1.0)
+
+    return processed.astype(np.float32)

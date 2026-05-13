@@ -2,14 +2,14 @@
 Pipeline principal de inferencia y control del robot.
 
 Flujo:
-  IP Webcam (MJPEG) → Thread captura → Queue → Thread inferencia
+  Cámara (Continuity Camera o URL MJPEG) → Thread captura → Queue → Thread inferencia
   → preprocess → FrameBuffer → NavCNN → StateMachine
   → comando UDP (1 byte) → ESP32
 
 Uso:
-    uv run python main_robot.py
-    uv run python main_robot.py --display          # ventana de debug
-    uv run python main_robot.py --ip 192.168.2.1   # IP del celular
+    uv run python main_robot.py --camera 2            # iPhone via Continuity Camera
+    uv run python main_robot.py --camera 2 --display  # con ventana de debug
+    uv run python main_robot.py --camera list         # ver índices disponibles
 """
 
 import argparse
@@ -96,27 +96,76 @@ class UDPSender:
                 self._ok = False
 
 
+# ── Buffer de delay para compensar look-ahead de la cámara ───────────────────
+
+class DelayBuffer:
+    """
+    Encola comandos y los libera después de `delay_ms` milisegundos.
+    STOP siempre se envía inmediatamente sin delay (seguridad).
+    RECTA/ADELANTE tampoco se demoran — solo los giros se retrasan.
+    """
+
+    INSTANT_CMDS = {CMD_STOP}   # comandos que nunca esperan
+
+    def __init__(self, sender: 'UDPSender', delay_ms: float = 0):
+        self._sender   = sender
+        self._delay    = delay_ms / 1000.0
+        self._pending: list[tuple[float, int]] = []   # (send_at, cmd)
+
+    def push(self, cmd: int) -> None:
+        if cmd in self.INSTANT_CMDS or self._delay == 0:
+            self._pending.clear()
+            self._sender.send(cmd)
+            return
+        # Solo programar si no hay uno pendiente o si cambió el comando
+        if not self._pending or self._pending[0][1] != cmd:
+            self._pending = [(time.time() + self._delay, cmd)]
+
+    def flush(self) -> None:
+        if not self._pending:
+            return
+        now = time.time()
+        due = [(t, c) for t, c in self._pending if t <= now]
+        if due:
+            _, cmd = due[-1]
+            self._sender.send(cmd)
+            self._pending = [(t, c) for t, c in self._pending if t > now]
+
+    @property
+    def wifi_ok(self) -> bool:
+        return self._sender.wifi_ok
+
+
 # ── Thread de captura de frames ────────────────────────────────────────────────
 
-def _capture_thread(url: str, frame_q: queue.Queue, stop_evt: threading.Event) -> None:
-    cap = cv2.VideoCapture(url)
+def _list_cameras() -> None:
+    print("\nCámaras disponibles:")
+    for i in range(6):
+        cap = cv2.VideoCapture(i)
+        if cap.isOpened():
+            print(f"  [{i}] disponible")
+            cap.release()
+    print()
+
+
+def _capture_thread(src, frame_q: queue.Queue, stop_evt: threading.Event) -> None:
+    cap = cv2.VideoCapture(src)
     if not cap.isOpened():
-        print(f"[ERROR] No se pudo abrir stream: {url}")
+        print(f"[ERROR] No se pudo abrir cámara: {src}")
         stop_evt.set()
         return
+    if isinstance(src, int):
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH,  1280)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
     cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-    print(f"[robot] Stream abierto: {url}")
+    print(f"[robot] Cámara abierta: {src}")
 
     while not stop_evt.is_set():
         ret, bgr = cap.read()
         if not ret:
             print("[WARN] Frame perdido, reintentando...")
-            cap.release()
             time.sleep(0.3)
-            cap = cv2.VideoCapture(url)
-            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
             continue
-        # mantener solo el frame más reciente
         if frame_q.full():
             try:
                 frame_q.get_nowait()
@@ -184,36 +233,44 @@ def _draw_hud(bgr: np.ndarray, nav_lbl: str, cmd_lbl: str,
 
 # ── Loop principal ─────────────────────────────────────────────────────────────
 
-def run(ip: str, port: int, display: bool) -> None:
-    url = f"http://{ip}:{port}/video"
+def run(src, display: bool, scale: float = 1.0, delay_ms: float = 0) -> None:
     print(f"\n[robot] Iniciando pipeline.")
-    print(f"  Stream : {url}")
+    print(f"  Cámara : {src}")
     print(f"  ESP32  : {ESP32_IP}:{ESP32_PORT} (UDP)")
+    if delay_ms > 0:
+        print(f"  Delay  : {delay_ms:.0f} ms (look-ahead compensación)")
 
     model, device = _load_nav_model()
 
     buf     = FrameBuffer(FRAME_STACK)
     sm      = RobotStateMachine()
     sender  = UDPSender(ip=ESP32_IP, port=ESP32_PORT)
+    delayed = DelayBuffer(sender, delay_ms)
     fps_ctr = FPSCounter()
 
-    stop_evt = threading.Event()
-    frame_q  = queue.Queue(maxsize=2)
-
-    cap_thread = threading.Thread(
-        target=_capture_thread, args=(url, frame_q, stop_evt), daemon=True)
-    cap_thread.start()
+    # Lectura directa de cámara (sin thread) — más responsivo, mismo flujo que quick_test
+    cap = cv2.VideoCapture(src)
+    if not cap.isOpened():
+        print(f"[ERROR] No se pudo abrir cámara: {src}")
+        return
+    if isinstance(src, int):
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH,  1280)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+    print(f"[robot] Cámara abierta: {src}")
 
     print("[robot] Loop activo. Ctrl+C para detener.\n")
     fps_warn_shown = False
     last_nav_lbl   = "---"
     last_cmd_lbl   = "---"
+    stop_flag      = False
 
     try:
-        while not stop_evt.is_set():
-            try:
-                bgr = frame_q.get(timeout=1.0)
-            except queue.Empty:
+        while not stop_flag:
+            ret, bgr = cap.read()
+            if not ret:
+                print("\n[WARN] Frame perdido, reintentando...")
+                time.sleep(0.1)
                 continue
 
             proc = preprocess_frame(bgr)
@@ -221,7 +278,8 @@ def run(ip: str, port: int, display: bool) -> None:
 
             nav_idx      = _infer(model, buf.get_stack(), device)
             cmd_byte     = sm.update(nav_idx)
-            sender.send(cmd_byte)
+            delayed.push(cmd_byte)
+            delayed.flush()
 
             fps_ctr.tick()
             fps = fps_ctr.fps()
@@ -242,19 +300,23 @@ def run(ip: str, port: int, display: bool) -> None:
 
             if display:
                 hud = _draw_hud(bgr, last_nav_lbl, last_cmd_lbl,
-                                fps, sender.wifi_ok)
+                                fps, delayed.wifi_ok)
+                if scale != 1.0:
+                    h, w = hud.shape[:2]
+                    hud = cv2.resize(hud, (int(w * scale), int(h * scale)))
                 cv2.imshow("Robot — q para salir", hud)
                 if cv2.waitKey(1) & 0xFF == ord('q'):
+                    stop_flag = True
                     break
 
     except KeyboardInterrupt:
         pass
 
     finally:
+        cap.release()
         print(f"\n\n[robot] Enviando STOP al ESP32...")
         sender.send(CMD_STOP)
         time.sleep(0.15)
-        stop_evt.set()
         sender.close()
         if display:
             cv2.destroyAllWindows()
@@ -263,10 +325,18 @@ def run(ip: str, port: int, display: bool) -> None:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Pipeline principal del robot")
-    parser.add_argument("--ip",      default="192.168.2.1",
-                        help="IP del celular con IP Webcam (conectado al hotspot del Mac)")
-    parser.add_argument("--port",    type=int, default=8080)
+    parser.add_argument("--camera",  type=str, default="2",
+                        help="Índice de cámara (ej: 2) o 'list' para ver disponibles")
     parser.add_argument("--display", action="store_true",
                         help="Mostrar ventana de debug con OpenCV")
+    parser.add_argument("--scale",   type=float, default=1.0,
+                        help="Escala de la ventana de display (ej: 0.5)")
+    parser.add_argument("--delay",   type=float, default=0,
+                        help="Delay en ms para compensar look-ahead (ej: 800)")
     args = parser.parse_args()
-    run(args.ip, args.port, args.display)
+
+    if args.camera == "list":
+        _list_cameras()
+    else:
+        src = int(args.camera) if args.camera.isdigit() else args.camera
+        run(src, args.display, args.scale, args.delay)

@@ -1,15 +1,15 @@
 """
 Control manual del robot desde el teclado (prueba de conexión UDP).
 
-Abre una ventana pequeña — mantén presionada la tecla para mover el robot.
-Al soltar la tecla se envía STOP automáticamente.
+Abre una ventana pequeña. El robot mantiene el último comando hasta que
+presiones S explícitamente (modo sticky — no para al soltar la tecla).
 
 Controles:
     W  →  ADELANTE
     A  →  IZQUIERDA
     D  →  DERECHA
-    S  →  STOP manual
-    Q  →  salir
+    S  →  STOP
+    Q  →  salir (envía STOP antes de cerrar)
 
 Uso:
     uv run python test_manual.py
@@ -112,7 +112,7 @@ def run(ip: str, port: int) -> None:
         now = time.time()
         if key in KEY_MAP:
             cmd, lbl, color = KEY_MAP[key]
-            # Enviar inmediatamente al pulsar, o repetir si se mantiene
+            # Enviar solo si cambió el comando o hay que reenviar (keepalive)
             if key != last_cmd or (now - last_send) * 1000 > REPEAT_MS:
                 wifi_ok   = send(sock, addr, cmd)
                 last_send = now
@@ -120,12 +120,13 @@ def run(ip: str, port: int) -> None:
                 cmd_lbl   = lbl
                 cmd_color = color
         else:
-            # Ninguna tecla de movimiento → STOP
-            if last_cmd not in (ord('s'), -1):
-                wifi_ok  = send(sock, addr, CMD_STOP)
-                last_cmd = ord('s')
-                cmd_lbl  = "STOP"
-                cmd_color = (80, 80, 80)
+            # Sin tecla pulsada → reenviar el último comando (modo sticky)
+            # El robot sigue haciendo lo mismo hasta que presiones S
+            if last_cmd not in (-1,) and (now - last_send) * 1000 > REPEAT_MS:
+                existing_cmd = KEY_MAP.get(last_cmd)
+                if existing_cmd:
+                    wifi_ok   = send(sock, addr, existing_cmd[0])
+                    last_send = now
 
     # Asegurar STOP al salir
     send(sock, addr, CMD_STOP)
