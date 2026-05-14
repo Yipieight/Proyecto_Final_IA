@@ -1,6 +1,9 @@
 # Dataset (demasiado pesado para git)
 data/
 
+# Modelos TTS (Piper + Kokoro) — re-descargables
+voices/
+
 # Modelos entrenados
 models/*.pth
 models/*.pt
