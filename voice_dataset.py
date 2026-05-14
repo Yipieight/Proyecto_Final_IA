@@ -23,7 +23,7 @@ MAX_AUDIO_S = 2.0      # cortar audios largos a 2 s
 
 DATA_VOICE_DIR = Path("data") / "voice"
 
-VOICE_CLASSES     = ["ALTO", "ADELANTE", "IZQUIERDA", "DERECHA", "GIRO_IZQ", "GIRO_DER"]
+VOICE_CLASSES     = ["STOP", "ADELANTE", "IZQUIERDA", "DERECHA", "GIRO_IZQ", "GIRO_DER"]
 VOICE_CLASS_IDX   = {c: i for i, c in enumerate(VOICE_CLASSES)}
 VOICE_IDX_CLASS   = {i: c for i, c in enumerate(VOICE_CLASSES)}
 NUM_VOICE_CLASSES = len(VOICE_CLASSES)

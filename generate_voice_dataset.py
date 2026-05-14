@@ -3,18 +3,19 @@
 Genera dataset de audio para control por voz.
 
 Estrategia:
-  - 4 voces Piper en español (ES/AR/MX) → diversidad de acento y timbre
-  - Augmentación de velocidad y volumen por cada muestra limpia
+  - 8 voces Piper en español (ES/AR/MX) → máxima diversidad de acento y timbre
+  - Augmentación por muestra: velocidad (4 niveles), volumen, pitch (grave/agudo) = 9 variantes
   - Ruido sintético a 3 niveles SNR (babble, pink, white, car)  ← simula aula real
   - Reverb sintético (eco de sala)
+  - Filtro de micrófono (300–3400 Hz) — simula mic barato o teléfono
 
 Uso:
     uv run python generate_voice_dataset.py
 
-La primera ejecución descarga 3 modelos extra (~200 MB en total, solo una vez).
+La primera ejecución descarga los modelos nuevos (~300 MB total, solo una vez).
 Las siguientes ejecuciones usan los modelos cacheados en voices/.
 
-Dataset resultante: ~1500 muestras/clase, 9000 total.
+Dataset resultante: ~2000 muestras/clase, 12000 total.
 """
 
 import os
@@ -31,26 +32,49 @@ from scipy.signal import resample, butter, sosfilt
 VOICES_DIR        = Path("voices")
 DATA_VOICE        = Path("data") / "voice"
 TARGET_SR         = 16000
-SAMPLES_PER_VOICE = 70    # × 4 voces = 280 muestras limpias por clase
+SAMPLES_PER_VOICE = 45    # × 8 voces = 360 muestras limpias por clase
 SNR_LEVELS        = [20, 10, 5]   # dB (suave, moderado, fuerte)
 
 BASE_HF = "https://huggingface.co/rhasspy/piper-voices/resolve/main"
 
 PIPER_VOICES = [
+    # ── España ────────────────────────────────────────────────────────────────
     {
-        "name":        "davefx",           # España — voz masculina
+        "name":        "davefx",
         "model_path":  VOICES_DIR / "es_ES-davefx-medium.onnx",
         "config_path": VOICES_DIR / "es_ES-davefx-medium.onnx.json",
         "model_url":   f"{BASE_HF}/es/es_ES/davefx/medium/es_ES-davefx-medium.onnx",
         "config_url":  f"{BASE_HF}/es/es_ES/davefx/medium/es_ES-davefx-medium.onnx.json",
     },
     {
-        "name":        "sharvard",         # España — segunda voz masculina
+        "name":        "sharvard",
         "model_path":  VOICES_DIR / "es_ES-sharvard-medium.onnx",
         "config_path": VOICES_DIR / "es_ES-sharvard-medium.onnx.json",
         "model_url":   f"{BASE_HF}/es/es_ES/sharvard/medium/es_ES-sharvard-medium.onnx",
         "config_url":  f"{BASE_HF}/es/es_ES/sharvard/medium/es_ES-sharvard-medium.onnx.json",
     },
+    {
+        "name":        "carlfm",           # España — voz compacta x_low
+        "model_path":  VOICES_DIR / "es_ES-carlfm-x_low.onnx",
+        "config_path": VOICES_DIR / "es_ES-carlfm-x_low.onnx.json",
+        "model_url":   f"{BASE_HF}/es/es_ES/carlfm/x_low/es_ES-carlfm-x_low.onnx",
+        "config_url":  f"{BASE_HF}/es/es_ES/carlfm/x_low/es_ES-carlfm-x_low.onnx.json",
+    },
+    {
+        "name":        "mls_10246",        # España — voz MLS
+        "model_path":  VOICES_DIR / "es_ES-mls_10246-low.onnx",
+        "config_path": VOICES_DIR / "es_ES-mls_10246-low.onnx.json",
+        "model_url":   f"{BASE_HF}/es/es_ES/mls_10246/low/es_ES-mls_10246-low.onnx",
+        "config_url":  f"{BASE_HF}/es/es_ES/mls_10246/low/es_ES-mls_10246-low.onnx.json",
+    },
+    {
+        "name":        "mls_9972",         # España — segunda voz MLS
+        "model_path":  VOICES_DIR / "es_ES-mls_9972-low.onnx",
+        "config_path": VOICES_DIR / "es_ES-mls_9972-low.onnx.json",
+        "model_url":   f"{BASE_HF}/es/es_ES/mls_9972/low/es_ES-mls_9972-low.onnx",
+        "config_url":  f"{BASE_HF}/es/es_ES/mls_9972/low/es_ES-mls_9972-low.onnx.json",
+    },
+    # ── Argentina ─────────────────────────────────────────────────────────────
     {
         "name":        "daniela",          # Argentina — voz femenina alta calidad
         "model_path":  VOICES_DIR / "es_AR-daniela-high.onnx",
@@ -58,6 +82,7 @@ PIPER_VOICES = [
         "model_url":   f"{BASE_HF}/es/es_AR/daniela/high/es_AR-daniela-high.onnx",
         "config_url":  f"{BASE_HF}/es/es_AR/daniela/high/es_AR-daniela-high.onnx.json",
     },
+    # ── México ────────────────────────────────────────────────────────────────
     {
         "name":        "ald",              # México — voz masculina
         "model_path":  VOICES_DIR / "es_MX-ald-medium.onnx",
@@ -65,56 +90,24 @@ PIPER_VOICES = [
         "model_url":   f"{BASE_HF}/es/es_MX/ald/medium/es_MX-ald-medium.onnx",
         "config_url":  f"{BASE_HF}/es/es_MX/ald/medium/es_MX-ald-medium.onnx.json",
     },
+    {
+        "name":        "claude_mx",        # México — voz alta calidad
+        "model_path":  VOICES_DIR / "es_MX-claude-high.onnx",
+        "config_path": VOICES_DIR / "es_MX-claude-high.onnx.json",
+        "model_url":   f"{BASE_HF}/es/es_MX/claude/high/es_MX-claude-high.onnx",
+        "config_url":  f"{BASE_HF}/es/es_MX/claude/high/es_MX-claude-high.onnx.json",
+    },
 ]
 
-# ── Palabras por clase (sin ambigüedad entre clases) ──────────────────────────
+# ── Palabras por clase (3 por clase, fonéticamente distintas) ─────────────────
 
 VOICE_CLASSES = {
-    "ALTO":       [
-        "alto", "para", "detente", "frena", "basta", "espera", "quieto",
-        "detener", "parar", "stop", "detente ahí", "frena ya", "para ya",
-        "quieto ahí", "no avances", "alto ahí", "para el carro",
-        "no te muevas", "espera ahí",
-    ],
-    "ADELANTE":   [
-        "adelante", "avanza", "sigue", "avanzar", "seguir", "hacia adelante",
-        "continua", "recto", "ve recto", "sigue adelante", "continúa",
-        "muévete", "avanza ya", "ve hacia adelante", "sigue recto",
-        "directo", "ve directo", "ándale", "camina",
-    ],
-    "IZQUIERDA":  [
-        "izquierda", "curva izquierda", "dobla izquierda",
-        "voltea izquierda", "tuerce izquierda", "ve a la izquierda",
-        "mueve izquierda", "vira izquierda", "hacia la izquierda",
-        "dobla a la izquierda", "voltea a la izquierda",
-        "tuerce a la izquierda", "ve a la izq", "a la izquierda",
-        "muévete a la izquierda", "curva a la izquierda",
-    ],
-    "DERECHA":    [
-        "derecha", "curva derecha", "dobla derecha",
-        "voltea derecha", "tuerce derecha", "ve a la derecha",
-        "mueve derecha", "vira derecha", "hacia la derecha",
-        "dobla a la derecha", "voltea a la derecha",
-        "tuerce a la derecha", "ve a la der", "a la derecha",
-        "muévete a la derecha", "curva a la derecha",
-    ],
-    "GIRO_IZQ":   [
-        "giro izquierda", "giro a la izquierda", "giro completo izquierda",
-        "giro noventa izquierda", "giro noventa grados izquierda",
-        "giro noventa", "girar izquierda", "gira izquierda",
-        "gira a la izquierda", "vuelta izquierda", "vuelta a la izquierda",
-        "media vuelta izquierda", "giro en u izquierda",
-        "gira noventa izquierda", "gira noventa grados izquierda",
-    ],
-    "GIRO_DER":   [
-        "giro derecha", "giro a la derecha", "giro completo derecha",
-        "giro noventa derecha", "giro noventa grados derecha",
-        "girar derecha", "gira derecha",
-        "gira a la derecha", "vuelta derecha", "vuelta a la derecha",
-        "media vuelta derecha", "giro en u derecha",
-        "gira noventa derecha", "gira noventa grados derecha",
-        "vuelta completa derecha",
-    ],
+    "STOP":      ["stop", "para", "alto"],
+    "ADELANTE":  ["adelante", "sigue", "avanza"],
+    "IZQUIERDA": ["izquierda", "a la izquierda", "dobla izquierda"],
+    "DERECHA":   ["derecha", "a la derecha", "dobla derecha"],
+    "GIRO_IZQ":  ["giro izquierda", "gira izquierda", "giro a la izquierda"],
+    "GIRO_DER":  ["giro derecha",   "gira derecha",   "giro a la derecha"],
 }
 
 
@@ -156,12 +149,36 @@ def synthesize(voice, text: str) -> np.ndarray:
     return audio
 
 
-def speed_augment(audio: np.ndarray) -> list:
-    """Devuelve 7 variantes: velocidades extremas + volumen. Cubre habla rápida y lenta humana."""
-    n = len(audio)
-    variants = [audio.copy()]   # normal
+# ── Pitch shifting (tono sin cambiar duración) ────────────────────────────────
 
-    # Velocidades: 0.65× (muy lento) a 1.45× (muy rápido)
+def pitch_shift(audio: np.ndarray, semitones: float) -> np.ndarray:
+    """
+    Cambia el tono N semitonos sin alterar la duración.
+    Técnica: resampleo doble (cambia pitch+speed, luego restaura speed).
+    """
+    factor   = 2 ** (semitones / 12)
+    n        = len(audio)
+    # Paso 1: cambiar velocidad/tono
+    pitched  = resample(audio, int(n / factor)).astype(np.float32)
+    # Paso 2: restaurar duración (preserva el tono cambiado)
+    return resample(pitched, n).astype(np.float32)
+
+
+# ── Augmentación de variantes por muestra ────────────────────────────────────
+
+def base_augment(audio: np.ndarray) -> list:
+    """
+    9 variantes por muestra base:
+      velocidad × 4 (muy lento → muy rápido)
+      volumen   × 2 (suave, fuerte)
+      pitch     × 2 (grave −4 st, agudo +4 st)
+      + original
+    Cubre habla lenta/rápida, voces graves/agudas, micrófonos tímidos/fuertes.
+    """
+    n        = len(audio)
+    variants = [audio.copy()]
+
+    # Velocidades: 0.65× (muy lento) → 1.45× (muy rápido)
     for factor in (0.65, 0.82, 1.20, 1.45):
         stretched = resample(audio, int(n / factor)).astype(np.float32)
         if len(stretched) >= n:
@@ -169,22 +186,28 @@ def speed_augment(audio: np.ndarray) -> list:
         else:
             variants.append(np.pad(stretched, (0, n - len(stretched))))
 
-    variants.append(np.clip(audio * 0.55, -1, 1).astype(np.float32))   # muy suave
-    variants.append(np.clip(audio * 1.45, -1, 1).astype(np.float32))   # muy fuerte
-    return variants   # 7 variantes
+    # Volumen
+    variants.append(np.clip(audio * 0.50, -1, 1).astype(np.float32))   # muy suave
+    variants.append(np.clip(audio * 1.50, -1, 1).astype(np.float32))   # muy fuerte
+
+    # Tono
+    variants.append(pitch_shift(audio, -4))   # voz grave
+    variants.append(pitch_shift(audio, +4))   # voz aguda
+
+    return variants   # 9 variantes
 
 
 # ── Generadores de ruido sintético (100% offline, NumPy + SciPy) ──────────────
 
 def _pink_noise(n: int) -> np.ndarray:
     """Ruido 1/f via FFT (similar al ruido ambiental real)."""
-    freqs = np.fft.rfftfreq(n)
+    freqs    = np.fft.rfftfreq(n)
     freqs[0] = 1
-    power   = 1.0 / np.sqrt(freqs)
+    power    = 1.0 / np.sqrt(freqs)
     power[0] = 0
-    phase   = 2 * np.pi * np.random.rand(len(freqs))
-    noise   = np.fft.irfft(power * np.exp(1j * phase), n).astype(np.float32)
-    mx = np.abs(noise).max()
+    phase    = 2 * np.pi * np.random.rand(len(freqs))
+    noise    = np.fft.irfft(power * np.exp(1j * phase), n).astype(np.float32)
+    mx       = np.abs(noise).max()
     return noise / mx if mx > 1e-8 else noise
 
 
@@ -208,13 +231,11 @@ def _butter_lowpass(audio: np.ndarray, cutoff: float,
 
 
 def noise_white(n: int) -> np.ndarray:
-    """Ruido blanco uniforme."""
     noise = np.random.randn(n).astype(np.float32)
     return noise / (np.abs(noise).max() + 1e-8)
 
 
 def noise_pink(n: int) -> np.ndarray:
-    """Ruido rosa — suena más natural que el blanco."""
     return _pink_noise(n)
 
 
@@ -253,19 +274,23 @@ def mix_snr(speech: np.ndarray, noise_fn, snr_db: float) -> np.ndarray:
 # ── Reverb sintético ──────────────────────────────────────────────────────────
 
 def add_reverb(audio: np.ndarray, sr: int = TARGET_SR) -> np.ndarray:
-    """
-    Convoluciona audio con impulso de sala sintético.
-    Simula el eco de un aula o laboratorio (room_size 0.1–0.4 s).
-    """
-    room_s  = np.random.uniform(0.10, 0.35)
-    ir_len  = int(sr * room_s)
-    t       = np.linspace(0, 1, ir_len)
-    decay   = np.random.uniform(4, 9)
-    ir      = np.exp(-decay * t) * np.random.randn(ir_len).astype(np.float32)
-    ir[0]   = 1.0   # camino directo
-    result  = np.convolve(audio, ir)[:len(audio)]
-    mx = np.abs(result).max()
+    """Convoluciona audio con impulso de sala sintético (eco de aula 0.1–0.35 s)."""
+    room_s = np.random.uniform(0.10, 0.35)
+    ir_len = int(sr * room_s)
+    t      = np.linspace(0, 1, ir_len)
+    decay  = np.random.uniform(4, 9)
+    ir     = np.exp(-decay * t) * np.random.randn(ir_len).astype(np.float32)
+    ir[0]  = 1.0
+    result = np.convolve(audio, ir)[:len(audio)]
+    mx     = np.abs(result).max()
     return (result / mx * 0.90).astype(np.float32) if mx > 1e-8 else audio
+
+
+# ── Filtro de micrófono ───────────────────────────────────────────────────────
+
+def mic_filter(audio: np.ndarray, sr: int = TARGET_SR) -> np.ndarray:
+    """Bandpass 300–3400 Hz — simula micrófono barato o teléfono."""
+    return _butter_bandpass(audio, 300.0, 3400.0, sr)
 
 
 # ── Pipeline principal ────────────────────────────────────────────────────────
@@ -292,10 +317,10 @@ def generate_dataset() -> None:
         raise RuntimeError("No se pudo cargar ninguna voz. Verifica conexión a internet.")
 
     n_voices = len(loaded_voices)
+    n_clean  = SAMPLES_PER_VOICE * n_voices
     print(f"\nVoces activas: {n_voices}  "
-          f"(~{SAMPLES_PER_VOICE * n_voices} limpias + "
-          f"{SAMPLES_PER_VOICE * n_voices * len(SNR_LEVELS)} con ruido + "
-          f"{SAMPLES_PER_VOICE * n_voices} con reverb por clase)\n")
+          f"(~{n_clean} limpias + {n_clean * len(SNR_LEVELS)} con ruido + "
+          f"{n_clean} reverb + {n_clean} mic-filter por clase)\n")
 
     # ── Fase 2: generar por clase ─────────────────────────────────────────────
     for cls_name, words in VOICE_CLASSES.items():
@@ -306,17 +331,17 @@ def generate_dataset() -> None:
 
         print(f"[{cls_name}]")
 
-        # ── 2a: muestras limpias por voz ─────────────────────────────────────
+        # ── 2a: muestras limpias (9 variantes por síntesis) ──────────────────
         for v_name, voice in loaded_voices:
-            v_count  = 0
-            # Ciclar palabras para generar SAMPLES_PER_VOICE muestras
-            word_cycle = (words * 20)[: SAMPLES_PER_VOICE // 5 + 2]
+            v_count    = 0
+            n_variants = 9   # base_augment produce 9 variantes
+            word_cycle = (words * 20)[: SAMPLES_PER_VOICE // n_variants + 2]
             for word in word_cycle:
                 try:
                     base = synthesize(voice, word)
                 except Exception:
                     continue
-                for variant in speed_augment(base):
+                for variant in base_augment(base):
                     fname = out_dir / f"clean_{v_name}_{global_idx:05d}.wav"
                     sf.write(str(fname), variant, TARGET_SR)
                     clean_files.append(fname)
@@ -337,7 +362,7 @@ def generate_dataset() -> None:
                 mixed     = mix_snr(audio, noise_fn, snr)
                 fname     = out_dir / f"noise_snr{snr:02d}_{global_idx:05d}.wav"
                 sf.write(str(fname), mixed, TARGET_SR)
-                global_idx += 1
+                global_idx  += 1
                 noise_count += 1
         print(f"  ruido (3 SNR × {len(clean_files)} limpias): {noise_count} muestras")
 
@@ -348,9 +373,20 @@ def generate_dataset() -> None:
             rev   = add_reverb(audio)
             fname = out_dir / f"reverb_{global_idx:05d}.wav"
             sf.write(str(fname), rev, TARGET_SR)
-            global_idx += 1
+            global_idx   += 1
             reverb_count += 1
         print(f"  reverb: {reverb_count} muestras")
+
+        # ── 2d: filtro de micrófono ───────────────────────────────────────────
+        mic_count = 0
+        for src_path in clean_files:
+            audio, _ = sf.read(str(src_path), dtype="float32")
+            filtered  = mic_filter(audio)
+            fname     = out_dir / f"mic_{global_idx:05d}.wav"
+            sf.write(str(fname), filtered, TARGET_SR)
+            global_idx += 1
+            mic_count  += 1
+        print(f"  mic filter: {mic_count} muestras")
 
         total = len(list(out_dir.glob("*.wav")))
         print(f"  → TOTAL {cls_name}: {total} muestras\n")
