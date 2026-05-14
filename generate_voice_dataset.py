@@ -25,17 +25,17 @@ SAMPLE_RATE  = 22050          # Piper genera a 22050 Hz; se resamplea a 16000 tr
 TARGET_SR    = 16000
 SAMPLES_PER_CLASS = 240       # aprox: 8 palabras × 3 augments × 10 repeticiones
 
-# Modelo Piper ES (descarga directa desde HuggingFace releases)
+# Modelo Piper ES (descarga directa desde HuggingFace)
 PIPER_MODEL_URL  = (
-    "https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0"
-    "/es/es_MX/ingrid_olga/medium/es_MX-ingrid_olga-medium.onnx"
+    "https://huggingface.co/rhasspy/piper-voices/resolve/main"
+    "/es/es_ES/davefx/medium/es_ES-davefx-medium.onnx"
 )
 PIPER_CONFIG_URL = (
-    "https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0"
-    "/es/es_MX/ingrid_olga/medium/es_MX-ingrid_olga-medium.onnx.json"
+    "https://huggingface.co/rhasspy/piper-voices/resolve/main"
+    "/es/es_ES/davefx/medium/es_ES-davefx-medium.onnx.json"
 )
-MODEL_PATH  = VOICES_DIR / "es_MX-ingrid_olga-medium.onnx"
-CONFIG_PATH = VOICES_DIR / "es_MX-ingrid_olga-medium.onnx.json"
+MODEL_PATH  = VOICES_DIR / "es_ES-davefx-medium.onnx"
+CONFIG_PATH = VOICES_DIR / "es_ES-davefx-medium.onnx.json"
 
 # ── Palabras por clase ────────────────────────────────────────────────────────
 
@@ -73,7 +73,7 @@ def synthesize_piper(voice, text: str) -> np.ndarray:
     with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
         tmp_path = tmp.name
     with wave.open(tmp_path, "w") as wf:
-        voice.synthesize(text, wf)
+        voice.synthesize_wav(text, wf)
     audio, sr = sf.read(tmp_path, dtype="float32")
     os.unlink(tmp_path)
     # Resamplear a TARGET_SR si es necesario
