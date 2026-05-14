@@ -167,17 +167,15 @@ def pitch_shift(audio: np.ndarray, semitones: float) -> np.ndarray:
 
 def base_augment(audio: np.ndarray) -> list:
     """
-    9 variantes por muestra base:
+    13 variantes por muestra base:
       velocidad × 4 (muy lento → muy rápido)
       volumen   × 2 (suave, fuerte)
-      pitch     × 2 (grave −4 st, agudo +4 st)
+      pitch     × 6 (±2, ±4, ±6 semitonos — cubre todo el rango vocal humano)
       + original
-    Cubre habla lenta/rápida, voces graves/agudas, micrófonos tímidos/fuertes.
     """
     n        = len(audio)
     variants = [audio.copy()]
 
-    # Velocidades: 0.65× (muy lento) → 1.45× (muy rápido)
     for factor in (0.65, 0.82, 1.20, 1.45):
         stretched = resample(audio, int(n / factor)).astype(np.float32)
         if len(stretched) >= n:
@@ -185,15 +183,15 @@ def base_augment(audio: np.ndarray) -> list:
         else:
             variants.append(np.pad(stretched, (0, n - len(stretched))))
 
-    # Volumen
-    variants.append(np.clip(audio * 0.50, -1, 1).astype(np.float32))   # muy suave
-    variants.append(np.clip(audio * 1.50, -1, 1).astype(np.float32))   # muy fuerte
+    variants.append(np.clip(audio * 0.50, -1, 1).astype(np.float32))
+    variants.append(np.clip(audio * 1.50, -1, 1).astype(np.float32))
 
-    # Tono
-    variants.append(pitch_shift(audio, -4))   # voz grave
-    variants.append(pitch_shift(audio, +4))   # voz aguda
+    for st in (-6, -2, +2, +6):          # ±2 y ±6 semitonos adicionales
+        variants.append(pitch_shift(audio, st))
+    variants.append(pitch_shift(audio, -4))
+    variants.append(pitch_shift(audio, +4))
 
-    return variants   # 9 variantes
+    return variants   # 13 variantes
 
 
 # ── Generadores de ruido sintético (100% offline, NumPy + SciPy) ──────────────
@@ -325,6 +323,81 @@ def mic_filter(audio: np.ndarray, sr: int = TARGET_SR) -> np.ndarray:
     return _butter_bandpass(audio, 300.0, 3400.0, sr)
 
 
+# ── Clipping / distorsión ─────────────────────────────────────────────────────
+
+def add_clipping(audio: np.ndarray) -> np.ndarray:
+    """Simula micrófono saturado: recorta la señal al 55–80% de su pico."""
+    mx = np.abs(audio).max()
+    if mx < 1e-8:
+        return audio
+    threshold = np.random.uniform(0.55, 0.80)
+    clipped   = np.clip(audio / mx, -threshold, threshold)
+    return (clipped / threshold * mx).astype(np.float32)
+
+
+# ── EQ aleatorio ─────────────────────────────────────────────────────────────
+
+def random_eq(audio: np.ndarray, sr: int = TARGET_SR) -> np.ndarray:
+    """Boost/cut aleatorio en 2–3 bandas — simula diferentes salas/micrófonos."""
+    result  = audio.copy().astype(np.float64)
+    n_bands = np.random.randint(2, 4)
+    for _ in range(n_bands):
+        lo   = np.random.uniform(150, 4000)
+        hi   = min(lo * np.random.uniform(1.5, 4.0), 7000)
+        gain = np.random.uniform(0.25, 2.5)
+        band = _butter_bandpass(audio, lo, hi, sr).astype(np.float64)
+        result += (gain - 1.0) * band
+    peak = np.abs(result).max()
+    if peak > 1e-8:
+        result = result / peak * np.abs(audio).max()
+    return result.clip(-1, 1).astype(np.float32)
+
+
+# ── Ruido doble combinado ─────────────────────────────────────────────────────
+
+NOISE_PAIRS = [
+    (noise_babble, noise_rain),
+    (noise_crowd,  noise_wind),
+    (noise_babble, noise_car),
+    (noise_crowd,  noise_rain),
+    (noise_rain,   noise_white),
+    (noise_wind,   noise_car),
+    (noise_babble, noise_pink),
+]
+
+def mix_double_noise(speech: np.ndarray, fn1, fn2, snr_db: float) -> np.ndarray:
+    """Mezcla speech con dos tipos de ruido simultáneos al SNR indicado."""
+    n  = len(speech)
+    n1 = fn1(n).astype(np.float64)
+    n2 = fn2(n).astype(np.float64)
+    combined = (n1 + n2) * 0.5
+    s_pow = float(np.mean(speech.astype(np.float64) ** 2))
+    n_pow = float(np.mean(combined ** 2))
+    if s_pow < 1e-10 or n_pow < 1e-10:
+        return speech
+    target = s_pow / (10 ** (snr_db / 10))
+    scaled = combined * np.sqrt(target / n_pow)
+    return (speech.astype(np.float64) + scaled).clip(-1, 1).astype(np.float32)
+
+
+# ── Eco de pasillo (delay discreto) ──────────────────────────────────────────
+
+def corridor_echo(audio: np.ndarray, sr: int = TARGET_SR) -> np.ndarray:
+    """1–3 reflexiones con delay 50–200 ms — simula pasillo o pared lejana."""
+    result   = audio.astype(np.float64).copy()
+    n_echoes = np.random.randint(1, 4)
+    for i in range(1, n_echoes + 1):
+        delay_s   = np.random.uniform(0.05, 0.20)
+        delay_smp = int(sr * delay_s)
+        decay     = np.random.uniform(0.25, 0.55) ** i
+        if delay_smp < len(audio):
+            delayed           = np.zeros(len(audio), dtype=np.float64)
+            delayed[delay_smp:] = audio[:len(audio) - delay_smp] * decay
+            result           += delayed
+    peak = np.abs(result).max()
+    return (result / peak * 0.90).astype(np.float32) if peak > 1e-8 else audio
+
+
 # ── Pipeline principal ────────────────────────────────────────────────────────
 
 def generate_dataset() -> None:
@@ -377,10 +450,10 @@ def generate_dataset() -> None:
 
         print(f"[{cls_name}]")
 
-        # ── 2a: muestras limpias (9 variantes por síntesis) ──────────────────
+        # ── 2a: muestras limpias (13 variantes por síntesis) ─────────────────
         for v_name, synth_fn in loaded_voices:
             v_count    = 0
-            n_variants = 9   # base_augment produce 9 variantes
+            n_variants = 13  # base_augment produce 13 variantes
             word_cycle = (words * 20)[: SAMPLES_PER_VOICE // n_variants + 2]
             for word in word_cycle:
                 try:
@@ -461,6 +534,52 @@ def generate_dataset() -> None:
             global_idx      += 1
             mic_noise_count += 1
         print(f"  mic+ruido: {mic_noise_count} muestras")
+
+        # ── 2g: clipping / distorsión ─────────────────────────────────────────
+        clip_count = 0
+        for src_path in clean_files:
+            audio, _ = sf.read(str(src_path), dtype="float32")
+            clipped   = add_clipping(audio)
+            fname     = out_dir / f"clip_{global_idx:05d}.wav"
+            sf.write(str(fname), clipped, TARGET_SR)
+            global_idx  += 1
+            clip_count  += 1
+        print(f"  clipping: {clip_count} muestras")
+
+        # ── 2h: EQ aleatorio ──────────────────────────────────────────────────
+        eq_count = 0
+        for src_path in clean_files:
+            audio, _ = sf.read(str(src_path), dtype="float32")
+            eq_audio  = random_eq(audio)
+            fname     = out_dir / f"eq_{global_idx:05d}.wav"
+            sf.write(str(fname), eq_audio, TARGET_SR)
+            global_idx += 1
+            eq_count   += 1
+        print(f"  EQ aleatorio: {eq_count} muestras")
+
+        # ── 2i: ruido doble combinado ─────────────────────────────────────────
+        double_count = 0
+        for i, src_path in enumerate(clean_files):
+            audio, _ = sf.read(str(src_path), dtype="float32")
+            fn1, fn2  = NOISE_PAIRS[i % len(NOISE_PAIRS)]
+            snr       = SNR_LEVELS[i % len(SNR_LEVELS)]
+            mixed     = mix_double_noise(audio, fn1, fn2, snr)
+            fname     = out_dir / f"doublenoise_{global_idx:05d}.wav"
+            sf.write(str(fname), mixed, TARGET_SR)
+            global_idx   += 1
+            double_count += 1
+        print(f"  ruido doble: {double_count} muestras")
+
+        # ── 2j: eco de pasillo ────────────────────────────────────────────────
+        echo_count = 0
+        for src_path in clean_files:
+            audio, _ = sf.read(str(src_path), dtype="float32")
+            echo      = corridor_echo(audio)
+            fname     = out_dir / f"echo_{global_idx:05d}.wav"
+            sf.write(str(fname), echo, TARGET_SR)
+            global_idx  += 1
+            echo_count  += 1
+        print(f"  eco pasillo: {echo_count} muestras")
 
         total = len(list(out_dir.glob("*.wav")))
         print(f"  → TOTAL {cls_name}: {total} muestras\n")
