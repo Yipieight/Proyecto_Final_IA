@@ -42,16 +42,20 @@ CONFIG_PATH = VOICES_DIR / "es_ES-davefx-medium.onnx.json"
 VOICE_CLASSES = {
     "STOP":       ["para", "stop", "detente", "alto", "parar", "detener", "frena", "quieto"],
     "ADELANTE":   ["adelante", "avanza", "sigue", "avanzar", "seguir", "hacia adelante", "continua", "recto"],
-    "IZQUIERDA":  ["izquierda", "curva izquierda", "ir izquierda", "dobla izquierda",
-                   "voltea izquierda", "gira izquierda suave", "tuerce izquierda", "izq"],
-    "DERECHA":    ["derecha", "curva derecha", "ir derecha", "dobla derecha",
-                   "voltea derecha", "gira derecha suave", "tuerce derecha", "der"],
-    "GIRO_IZQ":   ["giro izquierda", "girar izquierda", "pivote izquierda",
-                   "noventa izquierda", "vuelta izquierda", "girar a la izquierda",
-                   "noventa grados izquierda", "giro noventa izquierda"],
-    "GIRO_DER":   ["giro derecha", "girar derecha", "pivote derecha",
-                   "noventa derecha", "vuelta derecha", "girar a la derecha",
-                   "noventa grados derecha", "giro noventa derecha"],
+    # IZQUIERDA/DERECHA = curvas suaves — sin ninguna variante con "giro"
+    "IZQUIERDA":  ["izquierda", "curva izquierda", "dobla izquierda",
+                   "voltea izquierda", "tuerce izquierda", "ve a la izquierda",
+                   "mueve izquierda", "vira izquierda"],
+    "DERECHA":    ["derecha", "curva derecha", "dobla derecha",
+                   "voltea derecha", "tuerce derecha", "ve a la derecha",
+                   "mueve derecha", "vira derecha"],
+    # GIRO_IZQ/GIRO_DER = pivote 90° — SIEMPRE empieza con "giro"
+    "GIRO_IZQ":   ["giro izquierda", "giro a la izquierda", "giro completo izquierda",
+                   "giro noventa izquierda", "giro noventa grados izquierda",
+                   "giro noventa", "girar izquierda", "giro izq"],
+    "GIRO_DER":   ["giro derecha", "giro a la derecha", "giro completo derecha",
+                   "giro noventa derecha", "giro noventa grados derecha",
+                   "giro cien derecha", "girar derecha", "giro der"],
 }
 
 
