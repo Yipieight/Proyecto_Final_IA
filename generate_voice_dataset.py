@@ -5,17 +5,16 @@ Genera dataset de audio para control por voz.
 Estrategia:
   - 8 voces Piper en español (ES/AR/MX) → máxima diversidad de acento y timbre
   - Augmentación por muestra: velocidad (4 niveles), volumen, pitch (grave/agudo) = 9 variantes
-  - Ruido sintético a 3 niveles SNR (babble, pink, white, car)  ← simula aula real
+  - 7 escenarios de ruido: aula, multitud, lluvia, viento, tráfico, rosa, blanco
+  - Ruido a 3 niveles SNR (20/10/5 dB)
   - Reverb sintético (eco de sala)
   - Filtro de micrófono (300–3400 Hz) — simula mic barato o teléfono
+  - Augmentación compuesta: reverb+ruido y mic+ruido simultáneos
 
 Uso:
     uv run python generate_voice_dataset.py
 
-La primera ejecución descarga los modelos nuevos (~300 MB total, solo una vez).
-Las siguientes ejecuciones usan los modelos cacheados en voices/.
-
-Dataset resultante: ~2000 muestras/clase, 12000 total.
+Dataset resultante: ~2900 muestras/clase, 17400 total.
 """
 
 import os
@@ -102,12 +101,12 @@ PIPER_VOICES = [
 # ── Palabras por clase (3 por clase, fonéticamente distintas) ─────────────────
 
 VOICE_CLASSES = {
-    "STOP":      ["stop", "para", "alto"],
-    "ADELANTE":  ["adelante", "sigue", "avanza"],
-    "IZQUIERDA": ["izquierda", "a la izquierda", "dobla izquierda"],
-    "DERECHA":   ["derecha", "a la derecha", "dobla derecha"],
-    "GIRO_IZQ":  ["giro izquierda", "gira izquierda", "giro a la izquierda"],
-    "GIRO_DER":  ["giro derecha",   "gira derecha",   "giro a la derecha"],
+    "STOP":      ["stop"],
+    "ADELANTE":  ["adelante"],
+    "IZQUIERDA": ["izquierda"],
+    "DERECHA":   ["derecha"],
+    "GIRO_IZQ":  ["giro izquierda"],
+    "GIRO_DER":  ["giro derecha"],
 }
 
 
@@ -256,7 +255,40 @@ def noise_car(n: int, sr: int = TARGET_SR) -> np.ndarray:
     return _butter_lowpass(_pink_noise(n), 250, sr)
 
 
-NOISE_FNS = [noise_babble, noise_pink, noise_white, noise_car]
+def noise_crowd(n: int, sr: int = TARGET_SR) -> np.ndarray:
+    """Multitud densa en público — 15 fuentes de voz superpuestas."""
+    result = np.zeros(n, dtype=np.float32)
+    for _ in range(15):
+        src = _pink_noise(n)
+        lo  = np.random.uniform(100, 600)
+        hi  = np.random.uniform(1500, 4500)
+        result += _butter_bandpass(src, lo, hi, sr)
+    mx = np.abs(result).max()
+    return result / mx if mx > 1e-8 else result
+
+
+def noise_rain(n: int, sr: int = TARGET_SR) -> np.ndarray:
+    """Lluvia — componente de alta frecuencia + retumbo grave."""
+    high   = _butter_bandpass(_pink_noise(n), 2000, 7000, sr)
+    rumble = _butter_lowpass(_pink_noise(n), 300, sr)
+    result = (0.70 * high + 0.30 * rumble).astype(np.float32)
+    mx = np.abs(result).max()
+    return result / mx if mx > 1e-8 else result
+
+
+def noise_wind(n: int, sr: int = TARGET_SR) -> np.ndarray:
+    """Viento — ruido de baja-media frecuencia con ráfagas moduladas."""
+    base = _butter_bandpass(_pink_noise(n), 80, 900, sr)
+    t    = np.linspace(0, n / sr, n)
+    gust = 0.5 + 0.5 * np.sin(2 * np.pi * 0.4 * t + np.random.uniform(0, 2 * np.pi))
+    result = (base * gust).astype(np.float32)
+    mx = np.abs(result).max()
+    return result / mx if mx > 1e-8 else result
+
+
+# 7 escenarios: aula, multitud, lluvia, viento, tráfico, rosa, blanco
+NOISE_FNS = [noise_babble, noise_crowd, noise_rain, noise_wind,
+             noise_car, noise_pink, noise_white]
 
 
 def mix_snr(speech: np.ndarray, noise_fn, snr_db: float) -> np.ndarray:
@@ -387,6 +419,34 @@ def generate_dataset() -> None:
             global_idx += 1
             mic_count  += 1
         print(f"  mic filter: {mic_count} muestras")
+
+        # ── 2e: reverb + ruido (compuesto — simula sala ruidosa) ─────────────
+        rev_noise_count = 0
+        for i, src_path in enumerate(clean_files):
+            audio, _ = sf.read(str(src_path), dtype="float32")
+            rev       = add_reverb(audio)
+            noise_fn  = NOISE_FNS[i % len(NOISE_FNS)]
+            snr       = SNR_LEVELS[i % len(SNR_LEVELS)]
+            compound  = mix_snr(rev, noise_fn, snr)
+            fname     = out_dir / f"rev_noise_{global_idx:05d}.wav"
+            sf.write(str(fname), compound, TARGET_SR)
+            global_idx      += 1
+            rev_noise_count += 1
+        print(f"  reverb+ruido: {rev_noise_count} muestras")
+
+        # ── 2f: mic filter + ruido (compuesto — mic barato en ambiente) ──────
+        mic_noise_count = 0
+        for i, src_path in enumerate(clean_files):
+            audio, _ = sf.read(str(src_path), dtype="float32")
+            filtered  = mic_filter(audio)
+            noise_fn  = NOISE_FNS[(i + 3) % len(NOISE_FNS)]   # offset para variedad
+            snr       = SNR_LEVELS[(i + 1) % len(SNR_LEVELS)]
+            compound  = mix_snr(filtered, noise_fn, snr)
+            fname     = out_dir / f"mic_noise_{global_idx:05d}.wav"
+            sf.write(str(fname), compound, TARGET_SR)
+            global_idx      += 1
+            mic_noise_count += 1
+        print(f"  mic+ruido: {mic_noise_count} muestras")
 
         total = len(list(out_dir.glob("*.wav")))
         print(f"  → TOTAL {cls_name}: {total} muestras\n")
