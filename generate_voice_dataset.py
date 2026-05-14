@@ -14,7 +14,7 @@ Uso:
 La primera ejecución descarga 3 modelos extra (~200 MB en total, solo una vez).
 Las siguientes ejecuciones usan los modelos cacheados en voices/.
 
-Dataset resultante: ~1000 muestras/clase, 6000 total.
+Dataset resultante: ~1500 muestras/clase, 9000 total.
 """
 
 import os
@@ -31,7 +31,7 @@ from scipy.signal import resample, butter, sosfilt
 VOICES_DIR        = Path("voices")
 DATA_VOICE        = Path("data") / "voice"
 TARGET_SR         = 16000
-SAMPLES_PER_VOICE = 50    # × 4 voces = 200 muestras limpias por clase
+SAMPLES_PER_VOICE = 70    # × 4 voces = 280 muestras limpias por clase
 SNR_LEVELS        = [20, 10, 5]   # dB (suave, moderado, fuerte)
 
 BASE_HF = "https://huggingface.co/rhasspy/piper-voices/resolve/main"
@@ -70,20 +70,51 @@ PIPER_VOICES = [
 # ── Palabras por clase (sin ambigüedad entre clases) ──────────────────────────
 
 VOICE_CLASSES = {
-    "STOP":       ["para", "stop", "detente", "alto", "parar", "detener", "frena", "quieto"],
-    "ADELANTE":   ["adelante", "avanza", "sigue", "avanzar", "seguir", "hacia adelante", "continua", "recto"],
-    "IZQUIERDA":  ["izquierda", "curva izquierda", "dobla izquierda",
-                   "voltea izquierda", "tuerce izquierda", "ve a la izquierda",
-                   "mueve izquierda", "vira izquierda"],
-    "DERECHA":    ["derecha", "curva derecha", "dobla derecha",
-                   "voltea derecha", "tuerce derecha", "ve a la derecha",
-                   "mueve derecha", "vira derecha"],
-    "GIRO_IZQ":   ["giro izquierda", "giro a la izquierda", "giro completo izquierda",
-                   "giro noventa izquierda", "giro noventa grados izquierda",
-                   "giro noventa", "girar izquierda", "giro izq"],
-    "GIRO_DER":   ["giro derecha", "giro a la derecha", "giro completo derecha",
-                   "giro noventa derecha", "giro noventa grados derecha",
-                   "giro cien derecha", "girar derecha", "giro der"],
+    "ALTO":       [
+        "alto", "para", "detente", "frena", "basta", "espera", "quieto",
+        "detener", "parar", "stop", "detente ahí", "frena ya", "para ya",
+        "quieto ahí", "no avances", "alto ahí", "para el carro",
+        "no te muevas", "espera ahí",
+    ],
+    "ADELANTE":   [
+        "adelante", "avanza", "sigue", "avanzar", "seguir", "hacia adelante",
+        "continua", "recto", "ve recto", "sigue adelante", "continúa",
+        "muévete", "avanza ya", "ve hacia adelante", "sigue recto",
+        "directo", "ve directo", "ándale", "camina",
+    ],
+    "IZQUIERDA":  [
+        "izquierda", "curva izquierda", "dobla izquierda",
+        "voltea izquierda", "tuerce izquierda", "ve a la izquierda",
+        "mueve izquierda", "vira izquierda", "hacia la izquierda",
+        "dobla a la izquierda", "voltea a la izquierda",
+        "tuerce a la izquierda", "ve a la izq", "a la izquierda",
+        "muévete a la izquierda", "curva a la izquierda",
+    ],
+    "DERECHA":    [
+        "derecha", "curva derecha", "dobla derecha",
+        "voltea derecha", "tuerce derecha", "ve a la derecha",
+        "mueve derecha", "vira derecha", "hacia la derecha",
+        "dobla a la derecha", "voltea a la derecha",
+        "tuerce a la derecha", "ve a la der", "a la derecha",
+        "muévete a la derecha", "curva a la derecha",
+    ],
+    "GIRO_IZQ":   [
+        "giro izquierda", "giro a la izquierda", "giro completo izquierda",
+        "giro noventa izquierda", "giro noventa grados izquierda",
+        "giro noventa", "girar izquierda", "gira izquierda",
+        "gira a la izquierda", "vuelta izquierda", "vuelta a la izquierda",
+        "media vuelta izquierda", "giro en u izquierda",
+        "gira noventa izquierda", "gira noventa grados izquierda",
+    ],
+    "GIRO_DER":   [
+        "giro derecha", "giro a la derecha", "giro completo derecha",
+        "giro noventa derecha", "giro noventa grados derecha",
+        "girar derecha", "gira derecha",
+        "gira a la derecha", "vuelta derecha", "vuelta a la derecha",
+        "media vuelta derecha", "giro en u derecha",
+        "gira noventa derecha", "gira noventa grados derecha",
+        "vuelta completa derecha",
+    ],
 }
 
 
@@ -126,20 +157,21 @@ def synthesize(voice, text: str) -> np.ndarray:
 
 
 def speed_augment(audio: np.ndarray) -> list:
-    """Devuelve [original, lento×0.88, rápido×1.12, suave, fuerte]."""
+    """Devuelve 7 variantes: velocidades extremas + volumen. Cubre habla rápida y lenta humana."""
     n = len(audio)
-    variants = [audio.copy()]
+    variants = [audio.copy()]   # normal
 
-    for factor in (0.88, 1.12):
+    # Velocidades: 0.65× (muy lento) a 1.45× (muy rápido)
+    for factor in (0.65, 0.82, 1.20, 1.45):
         stretched = resample(audio, int(n / factor)).astype(np.float32)
         if len(stretched) >= n:
             variants.append(stretched[:n])
         else:
             variants.append(np.pad(stretched, (0, n - len(stretched))))
 
-    variants.append(np.clip(audio * 0.6, -1, 1).astype(np.float32))
-    variants.append(np.clip(audio * 1.4, -1, 1).astype(np.float32))
-    return variants   # 5 variantes
+    variants.append(np.clip(audio * 0.55, -1, 1).astype(np.float32))   # muy suave
+    variants.append(np.clip(audio * 1.45, -1, 1).astype(np.float32))   # muy fuerte
+    return variants   # 7 variantes
 
 
 # ── Generadores de ruido sintético (100% offline, NumPy + SciPy) ──────────────

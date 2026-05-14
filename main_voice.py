@@ -41,7 +41,7 @@ MAX_UTTERANCE_S    = 2.0     # máx duración de un comando
 
 # Mapa clase → byte UDP (mismo protocolo que la cámara)
 VOICE_CMD_MAP = {
-    "STOP":      0x00,
+    "ALTO":      0x00,
     "ADELANTE":  0x01,
     "IZQUIERDA": 0x02,
     "DERECHA":   0x03,
