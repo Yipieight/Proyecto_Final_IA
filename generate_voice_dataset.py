@@ -1,55 +1,83 @@
 # generate_voice_dataset.py
 """
-Genera dataset de audio para control por voz usando Piper TTS (español).
+Genera dataset de audio para control por voz.
+
+Estrategia:
+  - 4 voces Piper en español (ES/AR/MX) → diversidad de acento y timbre
+  - Augmentación de velocidad y volumen por cada muestra limpia
+  - Ruido sintético a 3 niveles SNR (babble, pink, white, car)  ← simula aula real
+  - Reverb sintético (eco de sala)
 
 Uso:
     uv run python generate_voice_dataset.py
 
-Descarga el modelo Piper es_MX-ingrid_olga-medium la primera vez (~70 MB).
-Genera data/voice/<CLASE>/ con WAVs augmentados.
+La primera ejecución descarga 3 modelos extra (~200 MB en total, solo una vez).
+Las siguientes ejecuciones usan los modelos cacheados en voices/.
+
+Dataset resultante: ~1000 muestras/clase, 6000 total.
 """
 
 import os
 import wave
 import urllib.request
+import tempfile
 import numpy as np
 import soundfile as sf
 from pathlib import Path
-from scipy.signal import resample
+from scipy.signal import resample, butter, sosfilt
 
-# ── Configuración ────────────────────────────────────────────────────────────
+# ── Configuración ─────────────────────────────────────────────────────────────
 
-VOICES_DIR   = Path("voices")
-DATA_VOICE   = Path("data") / "voice"
-SAMPLE_RATE  = 22050          # Piper genera a 22050 Hz; se resamplea a 16000 tras
-TARGET_SR    = 16000
-SAMPLES_PER_CLASS = 240       # aprox: 8 palabras × 3 augments × 10 repeticiones
+VOICES_DIR        = Path("voices")
+DATA_VOICE        = Path("data") / "voice"
+TARGET_SR         = 16000
+SAMPLES_PER_VOICE = 50    # × 4 voces = 200 muestras limpias por clase
+SNR_LEVELS        = [20, 10, 5]   # dB (suave, moderado, fuerte)
 
-# Modelo Piper ES (descarga directa desde HuggingFace)
-PIPER_MODEL_URL  = (
-    "https://huggingface.co/rhasspy/piper-voices/resolve/main"
-    "/es/es_ES/davefx/medium/es_ES-davefx-medium.onnx"
-)
-PIPER_CONFIG_URL = (
-    "https://huggingface.co/rhasspy/piper-voices/resolve/main"
-    "/es/es_ES/davefx/medium/es_ES-davefx-medium.onnx.json"
-)
-MODEL_PATH  = VOICES_DIR / "es_ES-davefx-medium.onnx"
-CONFIG_PATH = VOICES_DIR / "es_ES-davefx-medium.onnx.json"
+BASE_HF = "https://huggingface.co/rhasspy/piper-voices/resolve/main"
 
-# ── Palabras por clase ────────────────────────────────────────────────────────
+PIPER_VOICES = [
+    {
+        "name":        "davefx",           # España — voz masculina
+        "model_path":  VOICES_DIR / "es_ES-davefx-medium.onnx",
+        "config_path": VOICES_DIR / "es_ES-davefx-medium.onnx.json",
+        "model_url":   f"{BASE_HF}/es/es_ES/davefx/medium/es_ES-davefx-medium.onnx",
+        "config_url":  f"{BASE_HF}/es/es_ES/davefx/medium/es_ES-davefx-medium.onnx.json",
+    },
+    {
+        "name":        "sharvard",         # España — segunda voz masculina
+        "model_path":  VOICES_DIR / "es_ES-sharvard-medium.onnx",
+        "config_path": VOICES_DIR / "es_ES-sharvard-medium.onnx.json",
+        "model_url":   f"{BASE_HF}/es/es_ES/sharvard/medium/es_ES-sharvard-medium.onnx",
+        "config_url":  f"{BASE_HF}/es/es_ES/sharvard/medium/es_ES-sharvard-medium.onnx.json",
+    },
+    {
+        "name":        "daniela",          # Argentina — voz femenina alta calidad
+        "model_path":  VOICES_DIR / "es_AR-daniela-high.onnx",
+        "config_path": VOICES_DIR / "es_AR-daniela-high.onnx.json",
+        "model_url":   f"{BASE_HF}/es/es_AR/daniela/high/es_AR-daniela-high.onnx",
+        "config_url":  f"{BASE_HF}/es/es_AR/daniela/high/es_AR-daniela-high.onnx.json",
+    },
+    {
+        "name":        "ald",              # México — voz masculina
+        "model_path":  VOICES_DIR / "es_MX-ald-medium.onnx",
+        "config_path": VOICES_DIR / "es_MX-ald-medium.onnx.json",
+        "model_url":   f"{BASE_HF}/es/es_MX/ald/medium/es_MX-ald-medium.onnx",
+        "config_url":  f"{BASE_HF}/es/es_MX/ald/medium/es_MX-ald-medium.onnx.json",
+    },
+]
+
+# ── Palabras por clase (sin ambigüedad entre clases) ──────────────────────────
 
 VOICE_CLASSES = {
     "STOP":       ["para", "stop", "detente", "alto", "parar", "detener", "frena", "quieto"],
     "ADELANTE":   ["adelante", "avanza", "sigue", "avanzar", "seguir", "hacia adelante", "continua", "recto"],
-    # IZQUIERDA/DERECHA = curvas suaves — sin ninguna variante con "giro"
     "IZQUIERDA":  ["izquierda", "curva izquierda", "dobla izquierda",
                    "voltea izquierda", "tuerce izquierda", "ve a la izquierda",
                    "mueve izquierda", "vira izquierda"],
     "DERECHA":    ["derecha", "curva derecha", "dobla derecha",
                    "voltea derecha", "tuerce derecha", "ve a la derecha",
                    "mueve derecha", "vira derecha"],
-    # GIRO_IZQ/GIRO_DER = pivote 90° — SIEMPRE empieza con "giro"
     "GIRO_IZQ":   ["giro izquierda", "giro a la izquierda", "giro completo izquierda",
                    "giro noventa izquierda", "giro noventa grados izquierda",
                    "giro noventa", "girar izquierda", "giro izq"],
@@ -59,92 +87,247 @@ VOICE_CLASSES = {
 }
 
 
-def download_model() -> None:
+# ── Descarga de voces ─────────────────────────────────────────────────────────
+
+def download_voice(cfg: dict) -> bool:
     VOICES_DIR.mkdir(exist_ok=True)
-    if not MODEL_PATH.exists():
-        print("Descargando modelo Piper ES (~65 MB)...")
-        urllib.request.urlretrieve(PIPER_MODEL_URL, MODEL_PATH)
-        print(f"  -> {MODEL_PATH}")
-    if not CONFIG_PATH.exists():
-        print("Descargando config Piper ES...")
-        urllib.request.urlretrieve(PIPER_CONFIG_URL, CONFIG_PATH)
-        print(f"  -> {CONFIG_PATH}")
+    ok = True
+    for key in ("model_path", "config_path"):
+        path = cfg[key]
+        url  = cfg[key.replace("path", "url")]
+        if path.exists():
+            continue
+        print(f"  Descargando {path.name} ...")
+        try:
+            urllib.request.urlretrieve(url, path)
+        except Exception as e:
+            print(f"  ERROR descargando {path.name}: {e}")
+            ok = False
+    return ok
 
 
-def synthesize_piper(voice, text: str) -> np.ndarray:
-    """Sintetiza texto con Piper y devuelve audio float32 a TARGET_SR."""
-    import tempfile
+# ── Síntesis TTS ──────────────────────────────────────────────────────────────
+
+def synthesize(voice, text: str) -> np.ndarray:
+    """Sintetiza texto y devuelve audio float32 mono a TARGET_SR."""
     with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
         tmp_path = tmp.name
-    with wave.open(tmp_path, "w") as wf:
-        voice.synthesize_wav(text, wf)
-    audio, sr = sf.read(tmp_path, dtype="float32")
-    os.unlink(tmp_path)
-    # Resamplear a TARGET_SR si es necesario
+    try:
+        with wave.open(tmp_path, "w") as wf:
+            voice.synthesize_wav(text, wf)
+        audio, sr = sf.read(tmp_path, dtype="float32")
+    finally:
+        os.unlink(tmp_path)
+    if audio.ndim > 1:
+        audio = audio.mean(axis=1)
     if sr != TARGET_SR:
-        n_samples = int(len(audio) * TARGET_SR / sr)
-        audio = resample(audio, n_samples).astype(np.float32)
+        audio = resample(audio, int(len(audio) * TARGET_SR / sr)).astype(np.float32)
     return audio
 
 
-def augment(audio: np.ndarray) -> list:
-    """Devuelve [original, speed_slow, speed_fast, noisy, quiet]."""
+def speed_augment(audio: np.ndarray) -> list:
+    """Devuelve [original, lento×0.88, rápido×1.12, suave, fuerte]."""
+    n = len(audio)
     variants = [audio.copy()]
 
-    # Velocidad lenta (0.85×)
-    slow = resample(audio, int(len(audio) / 0.85)).astype(np.float32)
-    variants.append(slow[:len(audio)] if len(slow) >= len(audio)
-                    else np.pad(slow, (0, len(audio) - len(slow))))
+    for factor in (0.88, 1.12):
+        stretched = resample(audio, int(n / factor)).astype(np.float32)
+        if len(stretched) >= n:
+            variants.append(stretched[:n])
+        else:
+            variants.append(np.pad(stretched, (0, n - len(stretched))))
 
-    # Velocidad rápida (1.15×)
-    fast = resample(audio, int(len(audio) / 1.15)).astype(np.float32)
-    variants.append(fast[:len(audio)] if len(fast) >= len(audio)
-                    else np.pad(fast, (0, len(audio) - len(fast))))
+    variants.append(np.clip(audio * 0.6, -1, 1).astype(np.float32))
+    variants.append(np.clip(audio * 1.4, -1, 1).astype(np.float32))
+    return variants   # 5 variantes
 
-    # Ruido blanco suave
-    noisy = audio + np.random.normal(0, 0.005, len(audio)).astype(np.float32)
-    variants.append(noisy.clip(-1, 1))
 
-    # Volumen reducido
-    quiet = (audio * 0.6).astype(np.float32)
-    variants.append(quiet)
+# ── Generadores de ruido sintético (100% offline, NumPy + SciPy) ──────────────
 
-    return variants
+def _pink_noise(n: int) -> np.ndarray:
+    """Ruido 1/f via FFT (similar al ruido ambiental real)."""
+    freqs = np.fft.rfftfreq(n)
+    freqs[0] = 1
+    power   = 1.0 / np.sqrt(freqs)
+    power[0] = 0
+    phase   = 2 * np.pi * np.random.rand(len(freqs))
+    noise   = np.fft.irfft(power * np.exp(1j * phase), n).astype(np.float32)
+    mx = np.abs(noise).max()
+    return noise / mx if mx > 1e-8 else noise
 
+
+def _butter_bandpass(audio: np.ndarray, lo: float, hi: float,
+                     sr: int = TARGET_SR) -> np.ndarray:
+    nyq  = sr / 2
+    low  = np.clip(lo / nyq, 1e-4, 0.999)
+    high = np.clip(hi / nyq, 1e-4, 0.999)
+    if low >= high:
+        return audio
+    sos = butter(4, [low, high], btype="bandpass", output="sos")
+    return sosfilt(sos, audio).astype(np.float32)
+
+
+def _butter_lowpass(audio: np.ndarray, cutoff: float,
+                    sr: int = TARGET_SR) -> np.ndarray:
+    nyq  = sr / 2
+    norm = np.clip(cutoff / nyq, 1e-4, 0.999)
+    sos  = butter(4, norm, btype="low", output="sos")
+    return sosfilt(sos, audio).astype(np.float32)
+
+
+def noise_white(n: int) -> np.ndarray:
+    """Ruido blanco uniforme."""
+    noise = np.random.randn(n).astype(np.float32)
+    return noise / (np.abs(noise).max() + 1e-8)
+
+
+def noise_pink(n: int) -> np.ndarray:
+    """Ruido rosa — suena más natural que el blanco."""
+    return _pink_noise(n)
+
+
+def noise_babble(n: int, sr: int = TARGET_SR) -> np.ndarray:
+    """Simula murmullo de personas hablando (6 fuentes en rango de voz)."""
+    result = np.zeros(n, dtype=np.float32)
+    for _ in range(6):
+        src = _pink_noise(n)
+        lo  = np.random.uniform(200, 700)
+        hi  = np.random.uniform(1200, 3500)
+        result += _butter_bandpass(src, lo, hi, sr)
+    mx = np.abs(result).max()
+    return result / mx if mx > 1e-8 else result
+
+
+def noise_car(n: int, sr: int = TARGET_SR) -> np.ndarray:
+    """Ruido grave de motor / tráfico (< 250 Hz)."""
+    return _butter_lowpass(_pink_noise(n), 250, sr)
+
+
+NOISE_FNS = [noise_babble, noise_pink, noise_white, noise_car]
+
+
+def mix_snr(speech: np.ndarray, noise_fn, snr_db: float) -> np.ndarray:
+    """Mezcla speech + noise al SNR indicado (dB)."""
+    noise  = noise_fn(len(speech))
+    s_pow  = np.mean(speech ** 2)
+    n_pow  = np.mean(noise  ** 2)
+    if s_pow < 1e-10 or n_pow < 1e-10:
+        return speech
+    target = s_pow / (10 ** (snr_db / 10))
+    scaled = noise * np.sqrt(target / n_pow)
+    return (speech + scaled).clip(-1, 1).astype(np.float32)
+
+
+# ── Reverb sintético ──────────────────────────────────────────────────────────
+
+def add_reverb(audio: np.ndarray, sr: int = TARGET_SR) -> np.ndarray:
+    """
+    Convoluciona audio con impulso de sala sintético.
+    Simula el eco de un aula o laboratorio (room_size 0.1–0.4 s).
+    """
+    room_s  = np.random.uniform(0.10, 0.35)
+    ir_len  = int(sr * room_s)
+    t       = np.linspace(0, 1, ir_len)
+    decay   = np.random.uniform(4, 9)
+    ir      = np.exp(-decay * t) * np.random.randn(ir_len).astype(np.float32)
+    ir[0]   = 1.0   # camino directo
+    result  = np.convolve(audio, ir)[:len(audio)]
+    mx = np.abs(result).max()
+    return (result / mx * 0.90).astype(np.float32) if mx > 1e-8 else audio
+
+
+# ── Pipeline principal ────────────────────────────────────────────────────────
 
 def generate_dataset() -> None:
     from piper.voice import PiperVoice
 
-    download_model()
-    voice = PiperVoice.load(str(MODEL_PATH), config_path=str(CONFIG_PATH))
-    print(f"\nModelo Piper cargado: {MODEL_PATH.name}")
+    # ── Fase 1: cargar voces ──────────────────────────────────────────────────
+    print("Cargando voces Piper...")
+    loaded_voices: list[tuple[str, object]] = []
+    for cfg in PIPER_VOICES:
+        if download_voice(cfg):
+            try:
+                v = PiperVoice.load(str(cfg["model_path"]),
+                                    config_path=str(cfg["config_path"]))
+                loaded_voices.append((cfg["name"], v))
+                print(f"  ✓ {cfg['name']}")
+            except Exception as e:
+                print(f"  ✗ {cfg['name']}: {e}")
+        else:
+            print(f"  ✗ {cfg['name']}: descarga fallida")
 
+    if not loaded_voices:
+        raise RuntimeError("No se pudo cargar ninguna voz. Verifica conexión a internet.")
+
+    n_voices = len(loaded_voices)
+    print(f"\nVoces activas: {n_voices}  "
+          f"(~{SAMPLES_PER_VOICE * n_voices} limpias + "
+          f"{SAMPLES_PER_VOICE * n_voices * len(SNR_LEVELS)} con ruido + "
+          f"{SAMPLES_PER_VOICE * n_voices} con reverb por clase)\n")
+
+    # ── Fase 2: generar por clase ─────────────────────────────────────────────
     for cls_name, words in VOICE_CLASSES.items():
         out_dir = DATA_VOICE / cls_name
         out_dir.mkdir(parents=True, exist_ok=True)
-        idx = 0
-        print(f"\n[{cls_name}] Generando muestras...")
+        clean_files: list[Path] = []
+        global_idx = 0
 
-        word_cycle = (words * 30)[:SAMPLES_PER_CLASS // 5 + 1]
-        for word in word_cycle:
-            try:
-                base_audio = synthesize_piper(voice, word)
-            except Exception as e:
-                print(f"  WARN: fallo '{word}': {e}")
-                continue
+        print(f"[{cls_name}]")
 
-            for variant in augment(base_audio):
-                path = out_dir / f"sample_{idx:04d}.wav"
-                sf.write(str(path), variant, TARGET_SR)
-                idx += 1
-                if idx >= SAMPLES_PER_CLASS:
+        # ── 2a: muestras limpias por voz ─────────────────────────────────────
+        for v_name, voice in loaded_voices:
+            v_count  = 0
+            # Ciclar palabras para generar SAMPLES_PER_VOICE muestras
+            word_cycle = (words * 20)[: SAMPLES_PER_VOICE // 5 + 2]
+            for word in word_cycle:
+                try:
+                    base = synthesize(voice, word)
+                except Exception:
+                    continue
+                for variant in speed_augment(base):
+                    fname = out_dir / f"clean_{v_name}_{global_idx:05d}.wav"
+                    sf.write(str(fname), variant, TARGET_SR)
+                    clean_files.append(fname)
+                    global_idx += 1
+                    v_count    += 1
+                    if v_count >= SAMPLES_PER_VOICE:
+                        break
+                if v_count >= SAMPLES_PER_VOICE:
                     break
-            if idx >= SAMPLES_PER_CLASS:
-                break
+            print(f"  {v_name}: {v_count} muestras limpias")
 
-        print(f"  -> {idx} muestras en {out_dir}")
+        # ── 2b: ruido a 3 SNR ────────────────────────────────────────────────
+        noise_count = 0
+        for snr in SNR_LEVELS:
+            for i, src_path in enumerate(clean_files):
+                audio, _ = sf.read(str(src_path), dtype="float32")
+                noise_fn  = NOISE_FNS[i % len(NOISE_FNS)]
+                mixed     = mix_snr(audio, noise_fn, snr)
+                fname     = out_dir / f"noise_snr{snr:02d}_{global_idx:05d}.wav"
+                sf.write(str(fname), mixed, TARGET_SR)
+                global_idx += 1
+                noise_count += 1
+        print(f"  ruido (3 SNR × {len(clean_files)} limpias): {noise_count} muestras")
 
-    print("\nDataset generado en data/voice/")
+        # ── 2c: reverb ───────────────────────────────────────────────────────
+        reverb_count = 0
+        for src_path in clean_files:
+            audio, _ = sf.read(str(src_path), dtype="float32")
+            rev   = add_reverb(audio)
+            fname = out_dir / f"reverb_{global_idx:05d}.wav"
+            sf.write(str(fname), rev, TARGET_SR)
+            global_idx += 1
+            reverb_count += 1
+        print(f"  reverb: {reverb_count} muestras")
+
+        total = len(list(out_dir.glob("*.wav")))
+        print(f"  → TOTAL {cls_name}: {total} muestras\n")
+
+    grand_total = sum(
+        len(list((DATA_VOICE / cls).glob("*.wav")))
+        for cls in VOICE_CLASSES
+    )
+    print(f"Dataset completo: {grand_total} muestras en {DATA_VOICE}/")
 
 
 if __name__ == "__main__":
