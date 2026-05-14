@@ -3,7 +3,7 @@
 Genera dataset de audio para control por voz.
 
 Estrategia:
-  - 8 voces Piper en español (ES/AR/MX) → máxima diversidad de acento y timbre
+  - 5 voces Piper medium/high (ES/AR/MX) + 3 voces Kokoro ONNX (ES) = 8 voces de alta calidad
   - Augmentación por muestra: velocidad (4 niveles), volumen, pitch (grave/agudo) = 9 variantes
   - 7 escenarios de ruido: aula, multitud, lluvia, viento, tráfico, rosa, blanco
   - Ruido a 3 niveles SNR (20/10/5 dB)
@@ -31,7 +31,11 @@ from scipy.signal import resample, butter, sosfilt
 VOICES_DIR        = Path("voices")
 DATA_VOICE        = Path("data") / "voice"
 TARGET_SR         = 16000
-SAMPLES_PER_VOICE = 45    # × 8 voces = 360 muestras limpias por clase
+SAMPLES_PER_VOICE = 45    # × 8 voces (5 Piper + 3 Kokoro) = 360 limpias por clase
+
+KOKORO_MODEL  = VOICES_DIR / "kokoro-v1.0.onnx"
+KOKORO_VOICES_BIN = VOICES_DIR / "voices-v1.0.bin"
+KOKORO_VOICES_ES = ["ef_dora", "em_alex", "em_santa"]   # ♀ + 2♂ español
 SNR_LEVELS        = [20, 10, 5]   # dB (suave, moderado, fuerte)
 
 BASE_HF = "https://huggingface.co/rhasspy/piper-voices/resolve/main"
@@ -51,27 +55,6 @@ PIPER_VOICES = [
         "config_path": VOICES_DIR / "es_ES-sharvard-medium.onnx.json",
         "model_url":   f"{BASE_HF}/es/es_ES/sharvard/medium/es_ES-sharvard-medium.onnx",
         "config_url":  f"{BASE_HF}/es/es_ES/sharvard/medium/es_ES-sharvard-medium.onnx.json",
-    },
-    {
-        "name":        "carlfm",           # España — voz compacta x_low
-        "model_path":  VOICES_DIR / "es_ES-carlfm-x_low.onnx",
-        "config_path": VOICES_DIR / "es_ES-carlfm-x_low.onnx.json",
-        "model_url":   f"{BASE_HF}/es/es_ES/carlfm/x_low/es_ES-carlfm-x_low.onnx",
-        "config_url":  f"{BASE_HF}/es/es_ES/carlfm/x_low/es_ES-carlfm-x_low.onnx.json",
-    },
-    {
-        "name":        "mls_10246",        # España — voz MLS
-        "model_path":  VOICES_DIR / "es_ES-mls_10246-low.onnx",
-        "config_path": VOICES_DIR / "es_ES-mls_10246-low.onnx.json",
-        "model_url":   f"{BASE_HF}/es/es_ES/mls_10246/low/es_ES-mls_10246-low.onnx",
-        "config_url":  f"{BASE_HF}/es/es_ES/mls_10246/low/es_ES-mls_10246-low.onnx.json",
-    },
-    {
-        "name":        "mls_9972",         # España — segunda voz MLS
-        "model_path":  VOICES_DIR / "es_ES-mls_9972-low.onnx",
-        "config_path": VOICES_DIR / "es_ES-mls_9972-low.onnx.json",
-        "model_url":   f"{BASE_HF}/es/es_ES/mls_9972/low/es_ES-mls_9972-low.onnx",
-        "config_url":  f"{BASE_HF}/es/es_ES/mls_9972/low/es_ES-mls_9972-low.onnx.json",
     },
     # ── Argentina ─────────────────────────────────────────────────────────────
     {
@@ -131,21 +114,38 @@ def download_voice(cfg: dict) -> bool:
 
 # ── Síntesis TTS ──────────────────────────────────────────────────────────────
 
-def synthesize(voice, text: str) -> np.ndarray:
-    """Sintetiza texto y devuelve audio float32 mono a TARGET_SR."""
-    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
-        tmp_path = tmp.name
-    try:
-        with wave.open(tmp_path, "w") as wf:
-            voice.synthesize_wav(text, wf)
-        audio, sr = sf.read(tmp_path, dtype="float32")
-    finally:
-        os.unlink(tmp_path)
-    if audio.ndim > 1:
-        audio = audio.mean(axis=1)
-    if sr != TARGET_SR:
-        audio = resample(audio, int(len(audio) * TARGET_SR / sr)).astype(np.float32)
-    return audio
+def _piper_synth_fn(piper_voice):
+    """Devuelve función synth(text)->ndarray para una voz Piper."""
+    def synth(text: str) -> np.ndarray:
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+            tmp_path = tmp.name
+        try:
+            with wave.open(tmp_path, "w") as wf:
+                piper_voice.synthesize_wav(text, wf)
+            audio, sr = sf.read(tmp_path, dtype="float32")
+        finally:
+            os.unlink(tmp_path)
+        if audio.ndim > 1:
+            audio = audio.mean(axis=1)
+        if sr != TARGET_SR:
+            audio = resample(audio, int(len(audio) * TARGET_SR / sr)).astype(np.float32)
+        return audio.astype(np.float32)
+    return synth
+
+
+def _kokoro_synth_fn(kokoro, voice_name: str, lang: str = "es"):
+    """Devuelve función synth(text)->ndarray para una voz Kokoro ONNX."""
+    def synth(text: str) -> np.ndarray:
+        samples, sr = kokoro.create(text, voice=voice_name, lang=lang)
+        if hasattr(samples, 'numpy'):
+            samples = samples.numpy()
+        samples = np.asarray(samples, dtype=np.float32)
+        if samples.ndim > 1:
+            samples = samples.mean(axis=1)
+        if sr != TARGET_SR:
+            samples = resample(samples, int(len(samples) * TARGET_SR / sr)).astype(np.float32)
+        return samples
+    return synth
 
 
 # ── Pitch shifting (tono sin cambiar duración) ────────────────────────────────
@@ -329,24 +329,38 @@ def mic_filter(audio: np.ndarray, sr: int = TARGET_SR) -> np.ndarray:
 
 def generate_dataset() -> None:
     from piper.voice import PiperVoice
+    from kokoro_onnx import Kokoro
 
-    # ── Fase 1: cargar voces ──────────────────────────────────────────────────
-    print("Cargando voces Piper...")
+    # ── Fase 1a: cargar voces Piper ───────────────────────────────────────────
+    print("Cargando voces Piper (medium/high)...")
     loaded_voices: list[tuple[str, object]] = []
     for cfg in PIPER_VOICES:
         if download_voice(cfg):
             try:
                 v = PiperVoice.load(str(cfg["model_path"]),
                                     config_path=str(cfg["config_path"]))
-                loaded_voices.append((cfg["name"], v))
-                print(f"  ✓ {cfg['name']}")
+                loaded_voices.append((cfg["name"], _piper_synth_fn(v)))
+                print(f"  ✓ piper/{cfg['name']}")
             except Exception as e:
-                print(f"  ✗ {cfg['name']}: {e}")
+                print(f"  ✗ piper/{cfg['name']}: {e}")
         else:
-            print(f"  ✗ {cfg['name']}: descarga fallida")
+            print(f"  ✗ piper/{cfg['name']}: descarga fallida")
+
+    # ── Fase 1b: cargar voces Kokoro ONNX ────────────────────────────────────
+    print("Cargando voces Kokoro ONNX...")
+    if KOKORO_MODEL.exists() and KOKORO_VOICES_BIN.exists():
+        try:
+            kokoro = Kokoro(str(KOKORO_MODEL), str(KOKORO_VOICES_BIN))
+            for v_name in KOKORO_VOICES_ES:
+                loaded_voices.append((f"kokoro_{v_name}", _kokoro_synth_fn(kokoro, v_name)))
+                print(f"  ✓ kokoro/{v_name}")
+        except Exception as e:
+            print(f"  ✗ Kokoro no disponible: {e}")
+    else:
+        print("  ✗ Modelos Kokoro no encontrados en voices/ — solo se usará Piper")
 
     if not loaded_voices:
-        raise RuntimeError("No se pudo cargar ninguna voz. Verifica conexión a internet.")
+        raise RuntimeError("No se pudo cargar ninguna voz.")
 
     n_voices = len(loaded_voices)
     n_clean  = SAMPLES_PER_VOICE * n_voices
@@ -364,13 +378,13 @@ def generate_dataset() -> None:
         print(f"[{cls_name}]")
 
         # ── 2a: muestras limpias (9 variantes por síntesis) ──────────────────
-        for v_name, voice in loaded_voices:
+        for v_name, synth_fn in loaded_voices:
             v_count    = 0
             n_variants = 9   # base_augment produce 9 variantes
             word_cycle = (words * 20)[: SAMPLES_PER_VOICE // n_variants + 2]
             for word in word_cycle:
                 try:
-                    base = synthesize(voice, word)
+                    base = synth_fn(word)
                 except Exception:
                     continue
                 for variant in base_augment(base):
