@@ -102,9 +102,11 @@ def infer(model, audio: np.ndarray, device) -> str:
 
 # ── Loop principal ────────────────────────────────────────────────────────────
 
-def run(vad_threshold: float = 0.02, device_idx=None) -> None:
+def run(vad_threshold: float = 0.02, device_idx=None, dry_run: bool = False) -> None:
     model, torch_device = load_voice_model()
     sender = UDPSender()
+    if dry_run:
+        print("[voice] MODO PRUEBA — no se envían comandos al ESP32")
 
     chunk_samples  = int(TARGET_SR * CHUNK_DURATION_S)
     silence_chunks = int(SILENCE_DURATION_S / CHUNK_DURATION_S)
@@ -149,10 +151,13 @@ def run(vad_threshold: float = 0.02, device_idx=None) -> None:
                         audio_data = np.concatenate(buffer)
                         cls_name   = infer(model, audio_data, torch_device)
                         cmd_byte   = VOICE_CMD_MAP.get(cls_name, CMD_STOP)
-                        sender.send(cmd_byte)
 
-                        wifi_str = "OK " if sender.wifi_ok else "ERR"
-                        print(f" → {cls_name}  (UDP: 0x{cmd_byte:02X}  WiFi:{wifi_str})")
+                        if dry_run:
+                            print(f" → DETECTADO: {cls_name}")
+                        else:
+                            sender.send(cmd_byte)
+                            wifi_str = "OK " if sender.wifi_ok else "ERR"
+                            print(f" → {cls_name}  (UDP: 0x{cmd_byte:02X}  WiFi:{wifi_str})")
 
                         recording    = False
                         buffer       = []
@@ -161,26 +166,30 @@ def run(vad_threshold: float = 0.02, device_idx=None) -> None:
     except KeyboardInterrupt:
         pass
     finally:
-        print("\n[voice] Enviando STOP al ESP32...")
-        sender.send(CMD_STOP)
-        time.sleep(0.1)
+        if not dry_run:
+            print("\n[voice] Enviando STOP al ESP32...")
+            sender.send(CMD_STOP)
+            time.sleep(0.1)
         sender.close()
-        print("[voice] Finalizado.")
+        print("\n[voice] Finalizado.")
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Control por voz del robot")
+    parser.add_argument("--microphone",   type=int, default=None,
+                        help="Índice del micrófono (usa --microphone list para ver opciones)")
     parser.add_argument("--threshold",    type=float, default=0.02,
                         help="Umbral de energía RMS para VAD (default: 0.02)")
+    parser.add_argument("--dry-run",      action="store_true",
+                        help="Modo prueba: muestra lo detectado sin enviar al ESP32")
     parser.add_argument("--list-devices", action="store_true",
                         help="Mostrar micrófonos disponibles y salir")
-    parser.add_argument("--device",       type=int, default=None,
-                        help="Índice del micrófono (ver --list-devices)")
     args = parser.parse_args()
 
     if args.list_devices:
         print(sd.query_devices())
     else:
-        run(vad_threshold=args.threshold, device_idx=args.device)
+        run(vad_threshold=args.threshold, device_idx=args.microphone,
+            dry_run=args.dry_run)
