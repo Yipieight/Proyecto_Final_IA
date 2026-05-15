@@ -48,7 +48,7 @@ VAD_MARGIN     = 4.0          # threshold = noise_floor × margen
 MIN_CONFIDENCE = 0.80
 
 VOICE_CMD_MAP = {
-    "STOP":      0x00,
+    "DETENER":   0x00,
     "ADELANTE":  0x01,
     "IZQUIERDA": 0x02,
     "DERECHA":   0x03,

@@ -84,7 +84,7 @@ PIPER_VOICES = [
 # ── Palabras por clase (3 por clase, fonéticamente distintas) ─────────────────
 
 VOICE_CLASSES = {
-    "STOP":      ["stop"],
+    "DETENER":   ["detener"],
     "ADELANTE":  ["adelante"],
     "IZQUIERDA": ["izquierda"],
     "DERECHA":   ["derecha"],
@@ -400,7 +400,7 @@ def corridor_echo(audio: np.ndarray, sr: int = TARGET_SR) -> np.ndarray:
 
 # ── Pipeline principal ────────────────────────────────────────────────────────
 
-def generate_dataset() -> None:
+def generate_dataset(only: str | None = None) -> None:
     from piper.voice import PiperVoice
     from kokoro_onnx import Kokoro
 
@@ -442,7 +442,8 @@ def generate_dataset() -> None:
           f"{n_clean} reverb + {n_clean} mic-filter por clase)\n")
 
     # ── Fase 2: generar por clase ─────────────────────────────────────────────
-    for cls_name, words in VOICE_CLASSES.items():
+    classes_to_gen = {only: VOICE_CLASSES[only]} if only else VOICE_CLASSES
+    for cls_name, words in classes_to_gen.items():
         out_dir = DATA_VOICE / cls_name
         out_dir.mkdir(parents=True, exist_ok=True)
         clean_files: list[Path] = []
@@ -592,5 +593,10 @@ def generate_dataset() -> None:
 
 
 if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--only", type=str, default=None,
+                        help="Generar solo una clase (ej: --only DETENER)")
+    args = parser.parse_args()
     np.random.seed(42)
-    generate_dataset()
+    generate_dataset(only=args.only)
