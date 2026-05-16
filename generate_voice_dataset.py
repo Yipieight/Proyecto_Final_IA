@@ -14,7 +14,7 @@ Estrategia:
 Uso:
     uv run python generate_voice_dataset.py
 
-Dataset resultante: ~2900 muestras/clase, 17400 total.
+Dataset resultante: ~5400 muestras/clase, ~32400 total.
 """
 
 import os
@@ -398,6 +398,18 @@ def corridor_echo(audio: np.ndarray, sr: int = TARGET_SR) -> np.ndarray:
     return (result / peak * 0.90).astype(np.float32) if peak > 1e-8 else audio
 
 
+# ── Lugar público ────────────────────────────────────────────────────────────
+
+def public_place(audio: np.ndarray, sr: int = TARGET_SR) -> np.ndarray:
+    """Voz baja/media (25–55 %) con multitud fuerte de fondo (SNR 1–5 dB).
+    Simula hablar en pasillo, auditorio o salón lleno de gente."""
+    vol     = np.random.uniform(0.25, 0.55)
+    speech  = (audio * vol).astype(np.float32)
+    noise_fn = [noise_babble, noise_crowd][np.random.randint(0, 2)]
+    snr_db  = np.random.uniform(1.0, 5.0)
+    return mix_snr(speech, noise_fn, snr_db)
+
+
 # ── Pipeline principal ────────────────────────────────────────────────────────
 
 def generate_dataset(only: str | None = None) -> None:
@@ -446,7 +458,7 @@ def generate_dataset(only: str | None = None) -> None:
     for cls_name, words in classes_to_gen.items():
         out_dir = DATA_VOICE / cls_name
         out_dir.mkdir(parents=True, exist_ok=True)
-        clean_files: list[Path] = []
+        raw_synths: list[np.ndarray] = []   # audios crudos sin aumentación
         global_idx = 0
 
         print(f"[{cls_name}]")
@@ -461,10 +473,10 @@ def generate_dataset(only: str | None = None) -> None:
                     base = synth_fn(word)
                 except Exception:
                     continue
+                raw_synths.append(base)          # guardar audio crudo
                 for variant in base_augment(base):
                     fname = out_dir / f"clean_{v_name}_{global_idx:05d}.wav"
                     sf.write(str(fname), variant, TARGET_SR)
-                    clean_files.append(fname)
                     global_idx += 1
                     v_count    += 1
                     if v_count >= SAMPLES_PER_VOICE:
@@ -473,24 +485,29 @@ def generate_dataset(only: str | None = None) -> None:
                     break
             print(f"  {v_name}: {v_count} muestras limpias")
 
+        # Expandir audios crudos × 13 variantes base → base para fases 2b–2k
+        # Cada fase aplica su augmentación sobre combinaciones independientes
+        # de velocidad, pitch y volumen (no sobre los ya procesados de fase 2a)
+        all_variants: list[np.ndarray] = []
+        for raw in raw_synths:
+            all_variants.extend(list(base_augment(raw)))
+
         # ── 2b: ruido a 3 SNR ────────────────────────────────────────────────
         noise_count = 0
         for snr in SNR_LEVELS:
-            for i, src_path in enumerate(clean_files):
-                audio, _ = sf.read(str(src_path), dtype="float32")
-                noise_fn  = NOISE_FNS[i % len(NOISE_FNS)]
-                mixed     = mix_snr(audio, noise_fn, snr)
-                fname     = out_dir / f"noise_snr{snr:02d}_{global_idx:05d}.wav"
+            for i, variant in enumerate(all_variants):
+                noise_fn = NOISE_FNS[i % len(NOISE_FNS)]
+                mixed    = mix_snr(variant, noise_fn, snr)
+                fname    = out_dir / f"noise_snr{snr:02d}_{global_idx:05d}.wav"
                 sf.write(str(fname), mixed, TARGET_SR)
                 global_idx  += 1
                 noise_count += 1
-        print(f"  ruido (3 SNR × {len(clean_files)} limpias): {noise_count} muestras")
+        print(f"  ruido (3 SNR × {len(all_variants)} variantes): {noise_count} muestras")
 
         # ── 2c: reverb ───────────────────────────────────────────────────────
         reverb_count = 0
-        for src_path in clean_files:
-            audio, _ = sf.read(str(src_path), dtype="float32")
-            rev   = add_reverb(audio)
+        for variant in all_variants:
+            rev   = add_reverb(variant)
             fname = out_dir / f"reverb_{global_idx:05d}.wav"
             sf.write(str(fname), rev, TARGET_SR)
             global_idx   += 1
@@ -499,60 +516,55 @@ def generate_dataset(only: str | None = None) -> None:
 
         # ── 2d: filtro de micrófono ───────────────────────────────────────────
         mic_count = 0
-        for src_path in clean_files:
-            audio, _ = sf.read(str(src_path), dtype="float32")
-            filtered  = mic_filter(audio)
-            fname     = out_dir / f"mic_{global_idx:05d}.wav"
+        for variant in all_variants:
+            filtered = mic_filter(variant)
+            fname    = out_dir / f"mic_{global_idx:05d}.wav"
             sf.write(str(fname), filtered, TARGET_SR)
             global_idx += 1
             mic_count  += 1
         print(f"  mic filter: {mic_count} muestras")
 
-        # ── 2e: reverb + ruido (compuesto — simula sala ruidosa) ─────────────
+        # ── 2e: reverb + ruido ────────────────────────────────────────────────
         rev_noise_count = 0
-        for i, src_path in enumerate(clean_files):
-            audio, _ = sf.read(str(src_path), dtype="float32")
-            rev       = add_reverb(audio)
-            noise_fn  = NOISE_FNS[i % len(NOISE_FNS)]
-            snr       = SNR_LEVELS[i % len(SNR_LEVELS)]
-            compound  = mix_snr(rev, noise_fn, snr)
-            fname     = out_dir / f"rev_noise_{global_idx:05d}.wav"
+        for i, variant in enumerate(all_variants):
+            rev      = add_reverb(variant)
+            noise_fn = NOISE_FNS[i % len(NOISE_FNS)]
+            snr      = SNR_LEVELS[i % len(SNR_LEVELS)]
+            compound = mix_snr(rev, noise_fn, snr)
+            fname    = out_dir / f"rev_noise_{global_idx:05d}.wav"
             sf.write(str(fname), compound, TARGET_SR)
             global_idx      += 1
             rev_noise_count += 1
         print(f"  reverb+ruido: {rev_noise_count} muestras")
 
-        # ── 2f: mic filter + ruido (compuesto — mic barato en ambiente) ──────
+        # ── 2f: mic + ruido ───────────────────────────────────────────────────
         mic_noise_count = 0
-        for i, src_path in enumerate(clean_files):
-            audio, _ = sf.read(str(src_path), dtype="float32")
-            filtered  = mic_filter(audio)
-            noise_fn  = NOISE_FNS[(i + 3) % len(NOISE_FNS)]   # offset para variedad
-            snr       = SNR_LEVELS[(i + 1) % len(SNR_LEVELS)]
-            compound  = mix_snr(filtered, noise_fn, snr)
-            fname     = out_dir / f"mic_noise_{global_idx:05d}.wav"
+        for i, variant in enumerate(all_variants):
+            filtered = mic_filter(variant)
+            noise_fn = NOISE_FNS[(i + 3) % len(NOISE_FNS)]
+            snr      = SNR_LEVELS[(i + 1) % len(SNR_LEVELS)]
+            compound = mix_snr(filtered, noise_fn, snr)
+            fname    = out_dir / f"mic_noise_{global_idx:05d}.wav"
             sf.write(str(fname), compound, TARGET_SR)
             global_idx      += 1
             mic_noise_count += 1
         print(f"  mic+ruido: {mic_noise_count} muestras")
 
-        # ── 2g: clipping / distorsión ─────────────────────────────────────────
+        # ── 2g: clipping ─────────────────────────────────────────────────────
         clip_count = 0
-        for src_path in clean_files:
-            audio, _ = sf.read(str(src_path), dtype="float32")
-            clipped   = add_clipping(audio)
-            fname     = out_dir / f"clip_{global_idx:05d}.wav"
+        for variant in all_variants:
+            clipped = add_clipping(variant)
+            fname   = out_dir / f"clip_{global_idx:05d}.wav"
             sf.write(str(fname), clipped, TARGET_SR)
-            global_idx  += 1
-            clip_count  += 1
+            global_idx += 1
+            clip_count += 1
         print(f"  clipping: {clip_count} muestras")
 
         # ── 2h: EQ aleatorio ──────────────────────────────────────────────────
         eq_count = 0
-        for src_path in clean_files:
-            audio, _ = sf.read(str(src_path), dtype="float32")
-            eq_audio  = random_eq(audio)
-            fname     = out_dir / f"eq_{global_idx:05d}.wav"
+        for variant in all_variants:
+            eq_audio = random_eq(variant)
+            fname    = out_dir / f"eq_{global_idx:05d}.wav"
             sf.write(str(fname), eq_audio, TARGET_SR)
             global_idx += 1
             eq_count   += 1
@@ -560,12 +572,11 @@ def generate_dataset(only: str | None = None) -> None:
 
         # ── 2i: ruido doble combinado ─────────────────────────────────────────
         double_count = 0
-        for i, src_path in enumerate(clean_files):
-            audio, _ = sf.read(str(src_path), dtype="float32")
-            fn1, fn2  = NOISE_PAIRS[i % len(NOISE_PAIRS)]
-            snr       = SNR_LEVELS[i % len(SNR_LEVELS)]
-            mixed     = mix_double_noise(audio, fn1, fn2, snr)
-            fname     = out_dir / f"doublenoise_{global_idx:05d}.wav"
+        for i, variant in enumerate(all_variants):
+            fn1, fn2 = NOISE_PAIRS[i % len(NOISE_PAIRS)]
+            snr      = SNR_LEVELS[i % len(SNR_LEVELS)]
+            mixed    = mix_double_noise(variant, fn1, fn2, snr)
+            fname    = out_dir / f"doublenoise_{global_idx:05d}.wav"
             sf.write(str(fname), mixed, TARGET_SR)
             global_idx   += 1
             double_count += 1
@@ -573,14 +584,23 @@ def generate_dataset(only: str | None = None) -> None:
 
         # ── 2j: eco de pasillo ────────────────────────────────────────────────
         echo_count = 0
-        for src_path in clean_files:
-            audio, _ = sf.read(str(src_path), dtype="float32")
-            echo      = corridor_echo(audio)
-            fname     = out_dir / f"echo_{global_idx:05d}.wav"
+        for variant in all_variants:
+            echo  = corridor_echo(variant)
+            fname = out_dir / f"echo_{global_idx:05d}.wav"
             sf.write(str(fname), echo, TARGET_SR)
-            global_idx  += 1
-            echo_count  += 1
+            global_idx += 1
+            echo_count += 1
         print(f"  eco pasillo: {echo_count} muestras")
+
+        # ── 2k: lugar público (voz baja + multitud fuerte) ────────────────────
+        public_count = 0
+        for variant in all_variants:
+            pub   = public_place(variant)
+            fname = out_dir / f"public_{global_idx:05d}.wav"
+            sf.write(str(fname), pub, TARGET_SR)
+            global_idx   += 1
+            public_count += 1
+        print(f"  lugar público: {public_count} muestras")
 
         total = len(list(out_dir.glob("*.wav")))
         print(f"  → TOTAL {cls_name}: {total} muestras\n")
