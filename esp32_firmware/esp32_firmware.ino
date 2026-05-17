@@ -4,51 +4,55 @@
 // ── Configuración WiFi ──────────────────────────────
 // const char* SSID     = "iphone de Josecito";
 // const char* PASS     = "12345678";
-// const int   UDP_PORT = 9999;
 
 const char* SSID     = "CLARO1_84E9EC";
 const char* PASS     = "303K0WIEXC";
-const int   UDP_PORT = 9999;
 
 // const char* SSID     = "Ruan";
 // const char* PASS     = "Jl_7042mk";
-// const int   UDP_PORT = 9999;
+
+const int UDP_PORT = 9999;
 
 // ── Pines L298N ─────────────────────────────────────
-#define ENA 25
-#define IN1 26
+// ENA y ENB tienen jumper caps a 5V — NO se controlan desde GPIO.
+// La velocidad se regula con PWM en los pines IN (analogWrite).
+#define IN1 26   // Motor izquierdo (OUT1 / OUT2)
 #define IN2 27
-#define ENB 14
-#define IN3 13
+#define IN3 13   // Motor derecho   (OUT3 / OUT4)
 #define IN4 12
 
 WiFiUDP udp;
 
-// Acepta velocidades INDIVIDUALES para cada lado
+// ── Control de motores ───────────────────────────────
+// dir : 1 = adelante | -1 = atrás | 0 = stop
+// vel : 0-255  (PWM aplicado en los pines IN)
+//
+// FIX #1: derDir=1 usa IN3=PWM, IN4=0   (antes estaba invertido → derecho iba atrás)
+// FIX #2: velocidad vía analogWrite en IN, NO en ENA (ENA está fija a 5V por jumper)
+// FIX #3: stop usa analogWrite(pin,0) para cancelar el PWM limpiamente
 void setMotores(int izqDir, int derDir, int velIzq, int velDer) {
+
   // Motor izquierdo (OUT1 / OUT2)
-  if (izqDir == 1)       { digitalWrite(IN1, HIGH); digitalWrite(IN2, LOW);  }
-  else if (izqDir == -1) { digitalWrite(IN1, LOW);  digitalWrite(IN2, HIGH); }
-  else                   { digitalWrite(IN1, LOW);  digitalWrite(IN2, LOW);  }
+  if      (izqDir ==  1) { analogWrite(IN1, velIzq); analogWrite(IN2, 0);      }
+  else if (izqDir == -1) { analogWrite(IN1, 0);      analogWrite(IN2, velIzq); }
+  else                   { analogWrite(IN1, 0);      analogWrite(IN2, 0);      }
 
-  // Motor derecho (OUT3 / OUT4) — polaridad física invertida respecto al izq
-  if (derDir == 1)       { digitalWrite(IN3, LOW);  digitalWrite(IN4, HIGH); }
-  else if (derDir == -1) { digitalWrite(IN3, HIGH); digitalWrite(IN4, LOW);  }
-  else                   { digitalWrite(IN3, LOW);  digitalWrite(IN4, LOW);  }
-
-  ledcWrite(0, velIzq);
-  ledcWrite(1, velDer);
+  // Motor derecho (OUT3 / OUT4) — polaridad física corregida
+  if      (derDir ==  1) { analogWrite(IN3, velDer); analogWrite(IN4, 0);      }
+  else if (derDir == -1) { analogWrite(IN3, 0);      analogWrite(IN4, velDer); }
+  else                   { analogWrite(IN3, 0);      analogWrite(IN4, 0);      }
 }
 
 void setup() {
   pinMode(IN1, OUTPUT); pinMode(IN2, OUTPUT);
   pinMode(IN3, OUTPUT); pinMode(IN4, OUTPUT);
 
-  ledcSetup(0, 5000, 8); ledcAttachPin(ENA, 0);
-  ledcSetup(1, 5000, 8); ledcAttachPin(ENB, 1);
+  // Arrancar con todos los pines en LOW (STOP seguro)
+  analogWrite(IN1, 0); analogWrite(IN2, 0);
+  analogWrite(IN3, 0); analogWrite(IN4, 0);
 
   Serial.begin(115200);
-  Serial.println("Conectando a WiFi...");
+  Serial.println("\nConectando a WiFi...");
 
   WiFi.begin(SSID, PASS);
   while (WiFi.status() != WL_CONNECTED) {
@@ -56,8 +60,7 @@ void setup() {
     Serial.print(".");
   }
 
-  Serial.println("");
-  Serial.println("WiFi conectado!");
+  Serial.println("\nWiFi conectado!");
   Serial.print("IP del ESP32: ");
   Serial.println(WiFi.localIP());
 
@@ -71,33 +74,37 @@ void loop() {
     uint8_t cmd;
     udp.read(&cmd, 1);
 
-    Serial.print("Comando recibido: 0x0");
-    Serial.println(cmd, HEX);
+    Serial.print("CMD 0x"); Serial.println(cmd, HEX);
 
     switch (cmd) {
       case 0x00:  // STOP
         setMotores(0, 0, 0, 0);
-        Serial.println("PARAR");
+        Serial.println("→ STOP");
         break;
+
       case 0x01:  // ADELANTE
-        setMotores(1, 1, 10, 10);
-        Serial.println("ADELANTE");
+        setMotores(1, 1, 220, 220);
+        Serial.println("→ ADELANTE");
         break;
-      case 0x02:  // CURVA IZQUIERDA suave (diferencial)
-        setMotores(1, 1, 5, 20);
-        Serial.println("CURVA IZQ");
+
+      case 0x02:  // CURVA IZQUIERDA (derecho empuja, izquierdo frena)
+        setMotores(1, 1, 0, 255);
+        Serial.println("→ CURVA IZQ");
         break;
-      case 0x03:  // CURVA DERECHA suave (diferencial)
-        setMotores(1, 1, 20, 5);
-        Serial.println("CURVA DER");
+
+      case 0x03:  // CURVA DERECHA (izquierdo empuja, derecho frena)
+        setMotores(1, 1, 255, 0);
+        Serial.println("→ CURVA DER");
         break;
-      case 0x04:  // GIRO 90° IZQUIERDA (solo lado derecho activo)
-        setMotores(0, 1, 0, 255);
-        Serial.println("GIRO IZQ");
+
+      case 0x04:  // GIRO 90° IZQUIERDA — pivote real (izq atrás, der adelante)
+        setMotores(-1, 1, 255, 255);
+        Serial.println("→ GIRO IZQ");
         break;
-      case 0x05:  // GIRO 90° DERECHA (solo lado izquierdo activo)
-        setMotores(1, 0, 255, 0);
-        Serial.println("GIRO DER");
+
+      case 0x05:  // GIRO 90° DERECHA — pivote real (izq adelante, der atrás)
+        setMotores(1, -1, 255, 255);
+        Serial.println("→ GIRO DER");
         break;
     }
   }
