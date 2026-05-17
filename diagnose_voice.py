@@ -89,7 +89,7 @@ def main():
     device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
     print(f"[diagnose_voice] Dispositivo: {device}")
 
-    ckpt  = torch.load(MODEL_VOICE_PATH, map_location=device)
+    ckpt  = torch.load(MODEL_VOICE_PATH, map_location=device, weights_only=False)
     model = build_voice_model(device)
     model.load_state_dict(ckpt["model_state"])
     print(f"[diagnose_voice] Modelo cargado  (val_acc guardado: {ckpt.get('best_val_acc', 0):.1%})")

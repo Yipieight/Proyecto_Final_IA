@@ -90,7 +90,7 @@ def load_voice_model():
         )
     device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
     model  = build_voice_model(device)
-    ckpt   = torch.load(MODEL_VOICE_PATH, map_location=device)
+    ckpt   = torch.load(MODEL_VOICE_PATH, map_location=device, weights_only=False)
     model.load_state_dict(ckpt["model_state"])
     model.eval()
     print(f"[voice] Modelo cargado (val_acc: {ckpt.get('best_val_acc', 0):.1%})")
