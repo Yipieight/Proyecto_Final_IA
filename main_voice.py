@@ -223,12 +223,11 @@ def run_ptt(device_idx, dry_run: bool, verbose: bool,
             model, torch_device, sender: UDPSender) -> None:
     from pynput import keyboard as kb
 
-    chunk_samples = int(TARGET_SR * CHUNK_DURATION_S)
-    max_chunks    = int(MAX_UTTERANCE_S / CHUNK_DURATION_S)
+    chunk_samples     = int(TARGET_SR * CHUNK_DURATION_S)
+    max_chunks        = int(MAX_UTTERANCE_S / CHUNK_DURATION_S)
+    min_record_chunks = int(0.35 / CHUNK_DURATION_S)   # mínimo 350 ms grabado
 
-    # El stream SIEMPRE captura — evita perder audio por race condition
     audio_q: queue.Queue = queue.Queue()
-
     press_event   = threading.Event()
     release_event = threading.Event()
 
@@ -243,7 +242,7 @@ def run_ptt(device_idx, dry_run: bool, verbose: bool,
             press_event.clear()
 
     def audio_callback(indata, frames, time_info, status):
-        audio_q.put(indata[:, 0].copy())   # siempre captura
+        audio_q.put(indata[:, 0].copy())
 
     print(f"\n[PTT] Mantén ESPACIO para hablar, suelta para predecir.")
     print(f"[PTT] Confianza mínima: {MIN_CONFIDENCE:.0%}")
@@ -258,32 +257,38 @@ def run_ptt(device_idx, dry_run: bool, verbose: bool,
                             dtype="float32", blocksize=chunk_samples,
                             device=device_idx, callback=audio_callback):
             while True:
-                # Esperar a que el usuario presione ESPACIO
                 if not press_event.wait(timeout=0.1):
                     continue
 
-                # Vaciar audio pre-pulsación (estático/ambiente)
-                while not audio_q.empty():
-                    try:
-                        audio_q.get_nowait()
-                    except queue.Empty:
-                        break
+                # Descartar solo los chunks anteriores al press (ambiente pre-pulsación).
+                # Los chunks nuevos (inicio de la palabra) NO se descartan.
+                n_skip  = audio_q.qsize()
+                skipped = 0
 
                 print("  [PTT] ● Grabando...", end="", flush=True)
                 buffer = []
 
-                # Recoger audio hasta que suelte ESPACIO
-                while not release_event.is_set():
+                # Recoger hasta soltar ESPACIO — mínimo min_record_chunks
+                while True:
                     try:
-                        chunk = audio_q.get(timeout=0.05)
-                        buffer.append(chunk)
-                        if len(buffer) >= max_chunks:
-                            break
+                        chunk = audio_q.get(timeout=0.08)
                     except queue.Empty:
+                        if release_event.is_set() and len(buffer) >= min_record_chunks:
+                            break
                         continue
 
-                # Pequeña espera para capturar el final del audio
-                time.sleep(0.08)
+                    if skipped < n_skip:
+                        skipped += 1   # descartar pre-press
+                        continue
+
+                    buffer.append(chunk)
+
+                    released = release_event.is_set()
+                    if (released and len(buffer) >= min_record_chunks) or len(buffer) >= max_chunks:
+                        break
+
+                # Cola residual tras soltar (consonante final de la palabra)
+                time.sleep(0.12)
                 while not audio_q.empty():
                     try:
                         buffer.append(audio_q.get_nowait())
