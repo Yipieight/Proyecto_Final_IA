@@ -15,7 +15,7 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, random_split
 
-from voice_dataset import VoiceDataset, VOICE_CLASSES
+from voice_dataset import CachedVoiceDataset, VOICE_CLASSES
 from model_voice import build_voice_model, count_parameters
 
 MODEL_VOICE_PATH = os.path.join("models", "voice_model.pth")
@@ -27,7 +27,9 @@ def train(epochs: int = 30, batch_size: int = 32, lr: float = 1e-3,
     device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
     print(f"\n[train_voice] Device: {device}")
 
-    full_ds = VoiceDataset(augment=False)
+    full_ds = CachedVoiceDataset()
+    full_ds.move_to_device(device)
+
     n_val   = max(1, int(len(full_ds) * val_split))
     n_train = len(full_ds) - n_val
     train_ds, val_ds = random_split(

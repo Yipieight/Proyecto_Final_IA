@@ -23,7 +23,7 @@ import torch.nn as nn
 from torch.utils.data import DataLoader, Subset
 from sklearn.model_selection import StratifiedKFold
 
-from voice_dataset import VoiceDataset, VOICE_CLASSES, NUM_VOICE_CLASSES
+from voice_dataset import CachedVoiceDataset, VOICE_CLASSES, NUM_VOICE_CLASSES
 from model_voice import build_voice_model, count_parameters
 
 MODEL_PATH  = os.path.join("models", "voice_model.pth")
@@ -272,12 +272,10 @@ def main():
     device_name = "MPS (Metal Performance Shaders - Apple Silicon)" if str(device) == "mps" else "CPU"
     print(f"\n[kfold] Dispositivo: {device}")
 
-    print("[kfold] Cargando dataset...")
-    t0      = time.time()
-    full_ds = VoiceDataset(augment=False)
-    n_total = len(full_ds)
-    labels_all = np.array([full_ds.samples[i][1] for i in range(n_total)])
-    print(f"[kfold] {n_total} muestras  ({time.time()-t0:.1f}s)")
+    full_ds = CachedVoiceDataset()
+    full_ds.move_to_device(device)
+    n_total    = len(full_ds)
+    labels_all = full_ds.labels.cpu().numpy()
     print(f"[kfold] Parámetros modelo: {count_parameters(build_voice_model(device)):,}\n")
 
     # ── Split estratificado 80/20 ─────────────────────────────────────────────

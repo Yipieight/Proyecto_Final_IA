@@ -166,6 +166,55 @@ class VoiceDataset(Dataset):
         return tensor, label
 
 
+class CachedVoiceDataset(Dataset):
+    """
+    Precarga todos los mel-spectrograms en RAM al inicio.
+    Una vez cargado, cada __getitem__ es un acceso directo a tensor — sin I/O ni cómputo.
+
+    Uso en entrenamiento:
+        ds = CachedVoiceDataset()          # ~2 min de carga, luego muy rápido
+        ds.move_to_device(device)          # opcional: todo en MPS/GPU
+    """
+
+    def __init__(self, root: Path = DATA_VOICE_DIR):
+        import time
+        base = VoiceDataset(root, augment=False)
+        n    = len(base)
+
+        print(f"[cache] Precargando {n} muestras en RAM...")
+        t0 = time.time()
+
+        tensors = torch.zeros(n, 1, SPEC_SIZE, SPEC_SIZE, dtype=torch.float32)
+        labels  = torch.zeros(n, dtype=torch.long)
+
+        for i, (wav_path, label) in enumerate(base.samples):
+            audio, sr = sf.read(str(wav_path), dtype="float32")
+            if audio.ndim > 1:
+                audio = audio.mean(axis=1)
+            mel = compute_mel_spectrogram(audio, sr)
+            tensors[i, 0] = torch.from_numpy(mel)
+            labels[i]     = label
+            if (i + 1) % 8000 == 0:
+                print(f"  {i+1}/{n}  ({time.time()-t0:.0f}s)")
+
+        self.tensors = tensors
+        self.labels  = labels
+        mem_mb = tensors.numel() * 4 / 1024 / 1024
+        print(f"[cache] Listo en {time.time()-t0:.1f}s  (~{mem_mb:.0f} MB en RAM)")
+
+    def move_to_device(self, device: torch.device) -> "CachedVoiceDataset":
+        """Mueve tensores al dispositivo — elimina transferencias por batch."""
+        self.tensors = self.tensors.to(device)
+        self.labels  = self.labels.to(device)
+        return self
+
+    def __len__(self) -> int:
+        return len(self.labels)
+
+    def __getitem__(self, idx: int):
+        return self.tensors[idx], int(self.labels[idx])
+
+
 def report_balance(root: Path = DATA_VOICE_DIR) -> None:
     for cls in VOICE_CLASSES:
         d = root / cls
