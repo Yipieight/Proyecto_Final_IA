@@ -70,6 +70,7 @@ uv run python main_voice.py --ptt --microphone 1 --verbose --dry-run
 | `--microphone N` | entero | auto | Índice del micrófono a usar |
 | `--threshold X` | decimal | `0.015` | Sensibilidad VAD (bájalo si no detecta, súbelo si hay falsos positivos) |
 | `--confidence X` | decimal | `0.80` | Confianza mínima para aceptar predicción (0.0–1.0) |
+| `--no-vad` | switch | off | Desactiva detección de voz, predice continuamente cada 3s |
 | `--list-devices` | switch | — | Lista micrófonos y sale |
 
 ---

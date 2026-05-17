@@ -144,7 +144,8 @@ def _dispatch(cls_name: str, confidence: float, probs: np.ndarray,
 # ── Modo VAD (umbral adaptativo) ──────────────────────────────────────────────
 
 def run_vad(vad_threshold: float, device_idx, dry_run: bool, verbose: bool,
-            model, torch_device, sender: UDPSender) -> None:
+            model, torch_device, sender: UDPSender,
+            no_vad: bool = False) -> None:
     chunk_samples  = int(TARGET_SR * CHUNK_DURATION_S)
     silence_chunks = int(SILENCE_DURATION_S / CHUNK_DURATION_S)
     max_chunks     = int(MAX_UTTERANCE_S / CHUNK_DURATION_S)
@@ -154,10 +155,16 @@ def run_vad(vad_threshold: float, device_idx, dry_run: bool, verbose: bool,
     def callback(indata, frames, time_info, status):
         audio_q.put(indata[:, 0].copy())
 
-    print(f"\n[VAD] Umbral base: {vad_threshold}  (se adapta al ruido ambiente)")
-    print(f"[VAD] Confianza mínima: {MIN_CONFIDENCE:.0%}")
-    print(f"[VAD] Clases: {VOICE_CLASSES}")
-    print("[VAD] Escuchando... (Ctrl+C para salir)\n")
+    if no_vad:
+        print(f"\n[CONTINUO] Sin detección de voz — predice cada {MAX_UTTERANCE_S:.1f}s")
+        print(f"[CONTINUO] Confianza mínima: {MIN_CONFIDENCE:.0%}")
+        print(f"[CONTINUO] Clases: {VOICE_CLASSES}")
+        print("[CONTINUO] Escuchando... (Ctrl+C para salir)\n")
+    else:
+        print(f"\n[VAD] Umbral base: {vad_threshold}  (se adapta al ruido ambiente)")
+        print(f"[VAD] Confianza mínima: {MIN_CONFIDENCE:.0%}")
+        print(f"[VAD] Clases: {VOICE_CLASSES}")
+        print("[VAD] Escuchando... (Ctrl+C para salir)\n")
 
     recording    = False
     buffer       = []
@@ -169,7 +176,18 @@ def run_vad(vad_threshold: float, device_idx, dry_run: bool, verbose: bool,
                             dtype="float32", blocksize=chunk_samples,
                             device=device_idx, callback=callback):
             while True:
-                chunk     = audio_q.get()
+                chunk = audio_q.get()
+
+                if no_vad:
+                    # Modo continuo: acumula chunks fijos y predice sin umbral
+                    buffer.append(chunk)
+                    if len(buffer) >= max_chunks:
+                        audio_data            = np.concatenate(buffer)
+                        cls_name, conf, probs = infer(model, audio_data, torch_device)
+                        _dispatch(cls_name, conf, probs, sender, dry_run, verbose)
+                        buffer = []
+                    continue
+
                 rms       = float(np.sqrt(np.mean(chunk ** 2)))
                 threshold = max(vad_threshold, noise_floor * VAD_MARGIN)
 
@@ -188,7 +206,7 @@ def run_vad(vad_threshold: float, device_idx, dry_run: bool, verbose: bool,
                         silent_count = 0
 
                     if silent_count >= silence_chunks or len(buffer) >= max_chunks:
-                        audio_data          = np.concatenate(buffer)
+                        audio_data            = np.concatenate(buffer)
                         cls_name, conf, probs = infer(model, audio_data, torch_device)
                         _dispatch(cls_name, conf, probs, sender, dry_run, verbose)
                         recording    = False
@@ -302,6 +320,8 @@ def main() -> None:
                         help="Mostrar barras de probabilidad por clase")
     parser.add_argument("--dry-run",       action="store_true",
                         help="Mostrar predicciones sin enviar al ESP32")
+    parser.add_argument("--no-vad",        action="store_true",
+                        help="Desactivar detección de voz — predice continuamente cada 3s")
     parser.add_argument("--list-devices",  action="store_true",
                         help="Listar micrófonos disponibles y salir")
     args = parser.parse_args()
@@ -325,7 +345,7 @@ def main() -> None:
                     model, torch_device, sender)
         else:
             run_vad(args.threshold, args.microphone, args.dry_run, args.verbose,
-                    model, torch_device, sender)
+                    model, torch_device, sender, no_vad=args.no_vad)
     finally:
         if not args.dry_run:
             print("\n[voice] Enviando STOP al ESP32...")
