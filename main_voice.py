@@ -97,6 +97,45 @@ def load_voice_model():
     return model, device
 
 
+# ── Trim de silencio ─────────────────────────────────────────────────────────
+
+def _trim_silence(audio: np.ndarray,
+                  chunk_s: float = CHUNK_DURATION_S,
+                  margin: float = 0.6) -> np.ndarray:
+    """Recorta silencio al inicio y al final basándose en energía RMS.
+    Se usa en PTT para que el audio llegue al modelo igual que en VAD."""
+    chunk = int(TARGET_SR * chunk_s)
+    if len(audio) < chunk * 2:
+        return audio
+
+    # Calcular RMS por chunk y estimar piso de energía
+    rms_vals = [float(np.sqrt(np.mean(audio[i:i+chunk]**2)))
+                for i in range(0, len(audio) - chunk, chunk)]
+    if not rms_vals:
+        return audio
+    noise_floor = min(rms_vals)
+    threshold   = max(noise_floor * 4.0, 0.008)
+
+    # Primer chunk con voz
+    start_chunk = 0
+    for i, r in enumerate(rms_vals):
+        if r >= threshold:
+            start_chunk = i
+            break
+
+    # Último chunk con voz
+    end_chunk = len(rms_vals)
+    for i in range(len(rms_vals) - 1, -1, -1):
+        if rms_vals[i] >= threshold * margin:
+            end_chunk = i + 2   # +2 para no cortar consonante final
+            break
+
+    start = max(0, start_chunk * chunk)
+    end   = min(len(audio), end_chunk * chunk)
+    trimmed = audio[start:end]
+    return trimmed if len(trimmed) >= chunk * 2 else audio
+
+
 # ── Inferencia ────────────────────────────────────────────────────────────────
 
 @torch.no_grad()
@@ -296,7 +335,7 @@ def run_ptt(device_idx, dry_run: bool, verbose: bool,
                         break
 
                 if buffer:
-                    audio_data            = np.concatenate(buffer)
+                    audio_data            = _trim_silence(np.concatenate(buffer))
                     cls_name, conf, probs = infer(model, audio_data, torch_device)
                     _dispatch(cls_name, conf, probs, sender, dry_run, verbose)
                 else:
