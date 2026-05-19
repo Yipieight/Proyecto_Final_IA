@@ -1,17 +1,21 @@
 # train_gru.py
 """
-Entrena VoiceGRU sobre pares sintéticos de embeddings extraídos de VoiceCNN.
+Entrena VoiceGRU sobre audios compuestos construidos programáticamente.
 
 Flujo:
-  1. Carga embeddings/<CLASE>.npy para cada clase (extraídos por extract_embeddings.py)
-  2. Construye pares sintéticos (embed_palabra1, embed_palabra2) → label compuesto
-  3. Split 85/15 por clase (estratificado)
-  4. Entrena VoiceGRU con Adam + StepLR, 30 épocas
-  5. Guarda models/gru_model.pth + métricas en metrics/gru_report.json
+  1. Para cada clase compuesta (ej. ADELANTE_IZQUIERDA), carga WAVs de ambas
+     palabras del dataset existente (data/voice/).
+  2. Concatena: audio_palabra1 + silencio_aleatorio(50-200ms) + audio_palabra2
+     → audio compuesto de la frase completa hablada de corrido.
+  3. Calcula compute_mel_sequence → (T_MAX=300, 64) por muestra.
+  4. Entrena VoiceGRU con Adam + StepLR, 30 épocas.
+  5. Guarda models/gru_model.pth
+
+No se graban nuevos audios — se reutilizan los 32,112 WAVs del dataset de voz.
 
 Uso:
     uv run python train_gru.py
-    uv run python train_gru.py --epochs 50
+    uv run python train_gru.py --epochs 40 --pairs 800
 """
 
 import argparse
@@ -20,23 +24,24 @@ import time
 from pathlib import Path
 
 import numpy as np
+import soundfile as sf
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, Dataset, random_split
 
+from voice_dataset import DATA_VOICE_DIR
 from model_gru import (
     VoiceGRU,
+    compute_mel_sequence,
     COMPOUND_CLASSES,
     COMPOUND_CLASS_IDX,
     COMPOUND_WORD_PAIRS,
     NUM_COMPOUND,
-    EMBED_DIM,
+    T_MAX,
 )
 
-EMBEDDINGS_DIR = Path("embeddings")
-MODEL_OUT      = Path("models") / "gru_model.pth"
-METRICS_OUT    = Path("metrics") / "gru_report.json"
-PAIRS_PER_CLASS = 1000   # pares sintéticos por clase de comando compuesto
+MODEL_OUT   = Path("models") / "gru_model.pth"
+METRICS_OUT = Path("metrics") / "gru_report.json"
 
 DEVICE = (
     "mps"  if torch.backends.mps.is_available() else
@@ -45,35 +50,80 @@ DEVICE = (
 )
 
 
-# ── Dataset sintético ─────────────────────────────────────────────────────────
+# ── Dataset ───────────────────────────────────────────────────────────────────
 
-class CompoundDataset(Dataset):
+class CompoundAudioDataset(Dataset):
     """
-    Construye pares (embed_w1, embed_w2) → label_compuesto desde los .npy.
+    Genera audios compuestos concatenando pares de WAVs del dataset existente.
 
-    Para cada clase compuesta se muestrean aleatoriamente (con reemplazo)
-    PAIRS_PER_CLASS pares independientes de sus dos clases fuente.
+    Para cada clase compuesta:
+      audio_w1 + silencio(50–200ms) + audio_w2  →  compute_mel_sequence  →  (T_MAX, 64)
+
+    Los mel-spectrograms se pre-computan en RAM al construir el dataset.
     """
 
-    def __init__(self, embeddings: dict[str, np.ndarray], pairs_per_class: int, seed: int = 42):
+    def __init__(
+        self,
+        root: Path = DATA_VOICE_DIR,
+        pairs_per_class: int = 500,
+        seed: int = 42,
+    ):
         rng = np.random.default_rng(seed)
-        X, Y = [], []
 
+        # Cargar rutas de WAVs por clase fuente
+        wav_paths: dict[str, list[Path]] = {}
+        needed = set(w for pair in COMPOUND_WORD_PAIRS.values() for w in pair)
+        for cls_name in needed:
+            cls_dir = root / cls_name
+            if not cls_dir.exists():
+                raise FileNotFoundError(
+                    f"Carpeta no encontrada: {cls_dir}\n"
+                    "  Ejecuta primero: uv run python generate_voice_dataset.py"
+                )
+            paths = sorted(cls_dir.glob("*.wav"))
+            if not paths:
+                raise FileNotFoundError(f"Sin WAVs en {cls_dir}")
+            wav_paths[cls_name] = paths
+
+        # Construir pares (path_w1, path_w2, label)
+        pairs: list[tuple[Path, Path, int]] = []
         for compound_name, (w1, w2) in COMPOUND_WORD_PAIRS.items():
             label = COMPOUND_CLASS_IDX[compound_name]
-            e1 = embeddings[w1]   # (N1, 64)
-            e2 = embeddings[w2]   # (N2, 64)
-
-            idx1 = rng.integers(0, len(e1), size=pairs_per_class)
-            idx2 = rng.integers(0, len(e2), size=pairs_per_class)
-
+            p1    = wav_paths[w1]
+            p2    = wav_paths[w2]
+            idx1  = rng.integers(0, len(p1), size=pairs_per_class)
+            idx2  = rng.integers(0, len(p2), size=pairs_per_class)
             for i, j in zip(idx1, idx2):
-                pair = np.stack([e1[i], e2[j]], axis=0)   # (2, 64)
-                X.append(pair)
-                Y.append(label)
+                pairs.append((p1[i], p2[j], label))
 
-        self.X = torch.from_numpy(np.array(X, dtype=np.float32))  # (N, 2, 64)
-        self.Y = torch.tensor(Y, dtype=torch.long)                 # (N,)
+        # Pre-computar mel sequences
+        total = len(pairs)
+        print(f"[dataset] Pre-computando {total} audios compuestos...")
+        t0 = time.time()
+
+        X_list, Y_list = [], []
+        for k, (path1, path2, label) in enumerate(pairs):
+            a1, sr1 = sf.read(str(path1), dtype="float32")
+            a2, sr2 = sf.read(str(path2), dtype="float32")
+            if a1.ndim > 1: a1 = a1.mean(axis=1)
+            if a2.ndim > 1: a2 = a2.mean(axis=1)
+
+            # Silencio aleatorio entre palabras (50–200 ms)
+            gap_samples = int(sr1 * rng.integers(50, 201) / 1000)
+            silence     = np.zeros(gap_samples, dtype=np.float32)
+            compound    = np.concatenate([a1, silence, a2])
+
+            mel = compute_mel_sequence(compound, sr1)
+            X_list.append(mel)
+            Y_list.append(label)
+
+            if (k + 1) % 500 == 0:
+                print(f"  {k+1}/{total}  ({time.time()-t0:.0f}s)")
+
+        self.X = torch.from_numpy(np.stack(X_list))       # (N, T_MAX, N_MELS)
+        self.Y = torch.tensor(Y_list, dtype=torch.long)   # (N,)
+        mem_mb = self.X.numel() * 4 / 1024 / 1024
+        print(f"[dataset] Listo en {time.time()-t0:.1f}s  (~{mem_mb:.0f} MB en RAM)")
 
     def __len__(self) -> int:
         return len(self.Y)
@@ -83,19 +133,6 @@ class CompoundDataset(Dataset):
 
 
 # ── Entrenamiento ─────────────────────────────────────────────────────────────
-
-def load_embeddings() -> dict[str, np.ndarray]:
-    embeddings = {}
-    for cls_name in set(w for pair in COMPOUND_WORD_PAIRS.values() for w in pair):
-        path = EMBEDDINGS_DIR / f"{cls_name}.npy"
-        if not path.exists():
-            raise FileNotFoundError(
-                f"No se encontró {path}. Ejecuta primero: uv run python extract_embeddings.py"
-            )
-        embeddings[cls_name] = np.load(path)
-        print(f"  {cls_name:<14}: {embeddings[cls_name].shape[0]} embeddings")
-    return embeddings
-
 
 def train_epoch(model, loader, optimizer, criterion, device):
     model.train()
@@ -141,27 +178,25 @@ def confusion_matrix_np(model, loader, device, n_classes):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--epochs",       type=int,   default=30)
-    parser.add_argument("--lr",           type=float, default=1e-3)
-    parser.add_argument("--batch",        type=int,   default=64)
-    parser.add_argument("--pairs",        type=int,   default=PAIRS_PER_CLASS,
-                        help="Pares sintéticos por clase")
-    parser.add_argument("--val-split",    type=float, default=0.15)
+    parser.add_argument("--epochs",    type=int,   default=30)
+    parser.add_argument("--lr",        type=float, default=1e-3)
+    parser.add_argument("--batch",     type=int,   default=64)
+    parser.add_argument("--pairs",     type=int,   default=500,
+                        help="Pares de audio compuesto por clase (default: 500)")
+    parser.add_argument("--val-split", type=float, default=0.15)
     args = parser.parse_args()
 
     print(f"Dispositivo: {DEVICE}")
-    print("\nCargando embeddings...")
-    embeddings = load_embeddings()
+    print(f"Secuencia temporal: T_MAX={T_MAX} frames (3 s)\n")
 
-    print(f"\nConstruyendo dataset ({args.pairs} pares/clase × {NUM_COMPOUND} clases)...")
-    dataset = CompoundDataset(embeddings, args.pairs)
+    dataset = CompoundAudioDataset(pairs_per_class=args.pairs)
     n_val   = int(len(dataset) * args.val_split)
     n_train = len(dataset) - n_val
     train_ds, val_ds = random_split(
         dataset, [n_train, n_val],
         generator=torch.Generator().manual_seed(42),
     )
-    print(f"  Train: {n_train}  |  Val: {n_val}")
+    print(f"Train: {n_train}  |  Val: {n_val}\n")
 
     train_loader = DataLoader(train_ds, batch_size=args.batch, shuffle=True,  num_workers=0)
     val_loader   = DataLoader(val_ds,   batch_size=args.batch, shuffle=False, num_workers=0)
@@ -171,40 +206,38 @@ def main():
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
     scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=10, gamma=0.5)
 
-    print(f"\nEntrenando VoiceGRU — {sum(p.numel() for p in model.parameters() if p.requires_grad):,} parámetros")
-    print(f"{'Época':>5}  {'tr_loss':>8}  {'tr_acc':>7}  {'val_loss':>9}  {'val_acc':>8}  {'lr':>8}")
-    print("-" * 60)
+    n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"Entrenando VoiceGRU — {n_params:,} parámetros")
+    print(f"{'Época':>5}  {'tr_loss':>8}  {'tr_acc':>7}  {'val_loss':>9}  {'val_acc':>8}")
+    print("-" * 52)
 
-    history = {"train_loss": [], "train_acc": [], "val_loss": [], "val_acc": []}
-    best_val_acc = 0.0
-    t0 = time.time()
+    history       = {"train_loss": [], "train_acc": [], "val_loss": [], "val_acc": []}
+    best_val_acc  = 0.0
+    t0            = time.time()
 
     for epoch in range(1, args.epochs + 1):
         tr_loss, tr_acc = train_epoch(model, train_loader, optimizer, criterion, DEVICE)
-        vl_loss, vl_acc = eval_epoch(model, val_loader, criterion, DEVICE)
+        vl_loss, vl_acc = eval_epoch(model, val_loader,   criterion, DEVICE)
         scheduler.step()
 
         history["train_loss"].append(round(tr_loss, 4))
-        history["train_acc"].append(round(tr_acc,  4))
-        history["val_loss"].append(round(vl_loss,  4))
-        history["val_acc"].append(round(vl_acc,    4))
+        history["train_acc"].append(round(tr_acc,   4))
+        history["val_loss"].append(round(vl_loss,   4))
+        history["val_acc"].append(round(vl_acc,     4))
 
-        lr_now = scheduler.get_last_lr()[0]
-        print(f"{epoch:>5}  {tr_loss:>8.4f}  {tr_acc:>7.2%}  {vl_loss:>9.4f}  {vl_acc:>8.2%}  {lr_now:>8.6f}")
+        print(f"{epoch:>5}  {tr_loss:>8.4f}  {tr_acc:>7.2%}  {vl_loss:>9.4f}  {vl_acc:>8.2%}")
 
         if vl_acc > best_val_acc:
             best_val_acc = vl_acc
             torch.save(model.state_dict(), MODEL_OUT)
 
-    elapsed = time.time() - t0
-    print(f"\nEntrenamiento completado en {elapsed:.1f}s")
-    print(f"Mejor val_acc: {best_val_acc:.2%}  →  guardado en {MODEL_OUT}")
+    print(f"\nEntrenamiento completado en {time.time()-t0:.1f}s")
+    print(f"Mejor val_acc: {best_val_acc:.2%}  →  {MODEL_OUT}")
 
-    # Cargar mejor modelo para métricas finales
+    # Métricas finales
     model.load_state_dict(torch.load(MODEL_OUT, map_location=DEVICE, weights_only=True))
     cm = confusion_matrix_np(model, val_loader, DEVICE, NUM_COMPOUND)
 
-    # Métricas por clase
     per_class = {}
     for i, cls_name in enumerate(COMPOUND_CLASSES):
         tp = cm[i, i]
@@ -213,27 +246,31 @@ def main():
         prec = tp / (tp + fp) if (tp + fp) > 0 else 0.0
         rec  = tp / (tp + fn) if (tp + fn) > 0 else 0.0
         f1   = 2 * prec * rec / (prec + rec) if (prec + rec) > 0 else 0.0
-        per_class[cls_name] = {"precision": round(prec, 4), "recall": round(rec, 4), "f1": round(f1, 4), "n": int(cm[i].sum())}
+        per_class[cls_name] = {
+            "precision": round(prec, 4),
+            "recall":    round(rec,  4),
+            "f1":        round(f1,   4),
+            "n":         int(cm[i].sum()),
+        }
 
     report = {
-        "val_accuracy": round(best_val_acc, 4),
-        "epochs": args.epochs,
+        "val_accuracy":   round(best_val_acc, 4),
+        "epochs":         args.epochs,
         "pairs_per_class": args.pairs,
-        "per_class": per_class,
-        "history": history,
+        "t_max":          T_MAX,
+        "per_class":      per_class,
+        "history":        history,
         "confusion_matrix": cm.tolist(),
     }
-
     METRICS_OUT.parent.mkdir(exist_ok=True)
     with open(METRICS_OUT, "w") as f:
         json.dump(report, f, indent=2)
     print(f"Reporte guardado en {METRICS_OUT}")
 
-    print("\nMétricas por clase (val):")
-    print(f"  {'Clase':<24}  {'P':>6}  {'R':>6}  {'F1':>6}  {'N':>5}")
-    print("  " + "-" * 52)
+    print(f"\n{'Clase':<24}  {'P':>6}  {'R':>6}  {'F1':>6}  {'N':>5}")
+    print("  " + "-" * 48)
     for cls_name, m in per_class.items():
-        print(f"  {cls_name:<24}  {m['precision']:>6.2%}  {m['recall']:>6.2%}  {m['f1']:>6.2%}  {m['n']:>5}")
+        print(f"  {cls_name:<22}  {m['precision']:>6.2%}  {m['recall']:>6.2%}  {m['f1']:>6.2%}  {m['n']:>5}")
 
 
 if __name__ == "__main__":

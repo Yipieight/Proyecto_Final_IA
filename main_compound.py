@@ -2,22 +2,22 @@
 """
 Pipeline de control por voz para comandos compuestos de 2 palabras.
 
-Flujo (PTT doble):
-  Pulso 1: mantén ESPACIO → di palabra 1 → suelta
-  Pulso 2: mantén ESPACIO → di palabra 2 → suelta
+Flujo (un solo PTT):
+  Mantén ESPACIO → di la frase completa de corrido (ej. "adelante izquierda") → suelta
+  El audio completo se procesa como una secuencia temporal de mel-spectrogram.
   VoiceGRU predice el comando compuesto y envía 2 bytes UDP al ESP32.
 
 Flags:
-  --microphone N  Índice del micrófono
-  --confidence X  Confianza mínima del GRU (default: 0.80)
-  --dry-run       Muestra predicciones sin enviar al ESP32
-  --verbose       Muestra probabilidades detalladas
-  --delay X       Segundos entre el byte 1 y el byte 2 (default: 0.5)
-  --list-devices  Lista micrófonos y sale
+  --microphone N   Índice del micrófono
+  --confidence X   Confianza mínima del GRU (default: 0.80)
+  --dry-run        Muestra predicciones sin enviar al ESP32
+  --verbose        Muestra probabilidades por clase
+  --delay X        Segundos entre el byte 1 y el byte 2 (default: 0.5)
+  --list-devices   Lista micrófonos y sale
 
 Uso:
-    uv run python main_compound.py --dry-run
-    uv run python main_compound.py --microphone 1 --verbose
+    uv run python main_compound.py --dry-run --verbose
+    uv run python main_compound.py --microphone 1
     uv run python main_compound.py --microphone 1 --delay 0.8
 """
 
@@ -25,6 +25,7 @@ import argparse
 import os
 import queue
 import socket
+import threading
 import time
 
 import numpy as np
@@ -32,32 +33,23 @@ import sounddevice as sd
 import torch
 
 from utils import ESP32_IP, ESP32_PORT, CMD_STOP
-from voice_dataset import compute_mel_spectrogram, TARGET_SR, VOICE_IDX_CLASS
-from model_voice import VoiceCNN
 from model_gru import (
     VoiceGRU,
+    compute_mel_sequence,
     COMPOUND_CLASSES,
     COMPOUND_IDX_CLASS,
+    COMPOUND_CMD_BYTES,
     NUM_COMPOUND,
+    T_MAX,
 )
 
-MODEL_VOICE_PATH = os.path.join("models", "voice_model.pth")
-MODEL_GRU_PATH   = os.path.join("models", "gru_model.pth")
+MODEL_GRU_PATH = os.path.join("models", "gru_model.pth")
 
-# Mapeo compuesto → par de bytes UDP a enviar en secuencia
-COMPOUND_CMD_BYTES = {
-    "ADELANTE_IZQUIERDA": (0x01, 0x02),
-    "ADELANTE_DERECHA":   (0x01, 0x03),
-    "ADELANTE_DETENER":   (0x01, 0x00),
-    "GIRO_IZQ_ADELANTE":  (0x04, 0x01),
-    "GIRO_DER_ADELANTE":  (0x05, 0x01),
-    "IZQUIERDA_ADELANTE": (0x02, 0x01),
-    "DERECHA_ADELANTE":   (0x03, 0x01),
-}
-
-CHUNK_DURATION_S  = 0.05
-MAX_UTTERANCE_S   = 3.0
-MIN_CONFIDENCE    = 0.80
+TARGET_SR        = 16000
+CHUNK_DURATION_S = 0.05
+MAX_RECORD_S     = 3.5
+MIN_RECORD_S     = 0.35
+MIN_CONFIDENCE   = 0.80
 
 DEVICE_STR = (
     "mps"  if torch.backends.mps.is_available() else
@@ -66,93 +58,38 @@ DEVICE_STR = (
 )
 
 
-# ── Carga de modelos ──────────────────────────────────────────────────────────
-
-def load_voice_model(device: str) -> VoiceCNN:
-    if not os.path.exists(MODEL_VOICE_PATH):
-        raise FileNotFoundError(
-            f"Modelo no encontrado: {MODEL_VOICE_PATH}\n"
-            "  Ejecuta primero: uv run python train_voice.py"
-        )
-    model = VoiceCNN()
-    ckpt  = torch.load(MODEL_VOICE_PATH, map_location=device, weights_only=False)
-    model.load_state_dict(ckpt["model_state"])
-    model.to(device)
-    model.eval()
-    print(f"[voice] VoiceCNN cargada (val_acc: {ckpt.get('best_val_acc', 0):.1%})")
-    return model
-
+# ── Carga del modelo ──────────────────────────────────────────────────────────
 
 def load_gru_model(device: str) -> VoiceGRU:
     if not os.path.exists(MODEL_GRU_PATH):
         raise FileNotFoundError(
             f"Modelo no encontrado: {MODEL_GRU_PATH}\n"
-            "  Ejecuta primero:\n"
-            "    uv run python extract_embeddings.py\n"
-            "    uv run python train_gru.py"
+            "  Ejecuta primero: uv run python train_gru.py"
         )
     model = VoiceGRU()
     state = torch.load(MODEL_GRU_PATH, map_location=device, weights_only=True)
     model.load_state_dict(state)
     model.to(device)
     model.eval()
-    print(f"[gru]   VoiceGRU cargada ({NUM_COMPOUND} clases compuestas)")
+    print(f"[gru] VoiceGRU cargada ({NUM_COMPOUND} clases compuestas, T_MAX={T_MAX})")
     return model
 
 
-# ── Hook de embedding ─────────────────────────────────────────────────────────
-
-def make_embedding_hook(voice_model: VoiceCNN):
-    """
-    Registra un hook en classifier[5] (ReLU tras FC(256→64)).
-    Devuelve (store_dict, handle) — el embedding queda en store_dict["last"].
-    """
-    store = {}
-
-    def hook(module, input, output):
-        store["last"] = output.detach().cpu()
-
-    handle = voice_model.classifier[5].register_forward_hook(hook)
-    return store, handle
-
-
-# ── Inferencia individual (VoiceCNN → embedding) ─────────────────────────────
+# ── Inferencia ────────────────────────────────────────────────────────────────
 
 @torch.no_grad()
-def infer_word(
-    voice_model: VoiceCNN,
-    emb_store: dict,
-    audio: np.ndarray,
-    device: str,
-) -> tuple[str, float, np.ndarray]:
+def infer(model: VoiceGRU, audio: np.ndarray, device: str) -> tuple[str, float, np.ndarray]:
     """
-    Pasa el audio por VoiceCNN.
-    Devuelve (clase_predicha, confianza, embedding_64d).
+    Convierte el audio completo del enunciado compuesto a mel-sequence
+    y lo pasa por VoiceGRU.
+
+    Devuelve: (clase_compuesta, confianza, array_probs)
     """
-    mel    = compute_mel_spectrogram(audio)
-    x      = torch.from_numpy(mel[np.newaxis, np.newaxis]).to(device)
-    logits = voice_model(x)                            # forward activa el hook
-    probs  = torch.softmax(logits, dim=1)[0].cpu().numpy()
+    mel    = compute_mel_sequence(audio, sr=TARGET_SR, t_max=T_MAX)   # (T_MAX, 64)
+    x      = torch.from_numpy(mel[np.newaxis]).to(device)             # (1, T_MAX, 64)
+    probs  = torch.softmax(model(x), dim=1)[0].cpu().numpy()          # (N_COMPOUND,)
     idx    = int(probs.argmax())
-    emb    = emb_store["last"][0].numpy()              # (64,)
-    return VOICE_IDX_CLASS[idx], float(probs[idx]), emb
-
-
-# ── Inferencia compuesta (VoiceGRU) ──────────────────────────────────────────
-
-@torch.no_grad()
-def infer_compound(
-    gru_model: VoiceGRU,
-    emb1: np.ndarray,
-    emb2: np.ndarray,
-    device: str,
-) -> tuple[str, float]:
-    """Pasa la secuencia [emb1, emb2] por VoiceGRU. Devuelve (clase, confianza)."""
-    pair   = np.stack([emb1, emb2], axis=0)[np.newaxis]          # (1, 2, 64)
-    x      = torch.from_numpy(pair.astype(np.float32)).to(device)
-    probs  = torch.softmax(gru_model(x), dim=1)[0].cpu().numpy()
-    idx    = int(probs.argmax())
-    return COMPOUND_IDX_CLASS[idx], float(probs[idx])
+    return COMPOUND_IDX_CLASS[idx], float(probs[idx]), probs
 
 
 # ── UDP sender ────────────────────────────────────────────────────────────────
@@ -162,38 +99,38 @@ class UDPSender:
         self._addr = (ip, port)
         self._sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
-    def send(self, cmd: int) -> None:
-        self._sock.sendto(bytes([cmd]), self._addr)
+    def send(self, cmd: int) -> bool:
+        try:
+            self._sock.sendto(bytes([cmd]), self._addr)
+            return True
+        except Exception:
+            return False
 
     def close(self) -> None:
         self._sock.close()
 
 
-# ── Grabar una palabra con PTT ────────────────────────────────────────────────
+# ── PTT — captura un solo bloque de audio ────────────────────────────────────
 
-def record_word_ptt(device_idx, word_num: int) -> np.ndarray:
+def record_ptt(device_idx) -> np.ndarray:
     """
-    Graba hasta MAX_UTTERANCE_S segundos mientras el usuario mantiene ESPACIO.
-    Devuelve el array de audio (float32, 16kHz).
+    Mantén ESPACIO → habla la frase completa de corrido → suelta.
+    Captura todo el audio desde que se presiona hasta que se suelta
+    (máximo MAX_RECORD_S segundos).
     """
     from pynput import keyboard as kb
-    import threading
 
     chunk_samples     = int(TARGET_SR * CHUNK_DURATION_S)
-    max_chunks        = int(MAX_UTTERANCE_S / CHUNK_DURATION_S)
-    min_record_chunks = int(0.35 / CHUNK_DURATION_S)
+    max_chunks        = int(MAX_RECORD_S / CHUNK_DURATION_S)
+    min_record_chunks = int(MIN_RECORD_S / CHUNK_DURATION_S)
 
     audio_q       = queue.Queue()
+    pressed_event = threading.Event()
     release_event = threading.Event()
 
-    print(f"\n  Palabra {word_num}: mantén ESPACIO y habla → suelta para confirmar")
-
-    # Esperar que el usuario presione ESPACIO
-    pressed = threading.Event()
-
     def on_press(key):
-        if key == kb.Key.space and not pressed.is_set():
-            pressed.set()
+        if key == kb.Key.space and not pressed_event.is_set():
+            pressed_event.set()
 
     def on_release(key):
         if key == kb.Key.space:
@@ -204,16 +141,19 @@ def record_word_ptt(device_idx, word_num: int) -> np.ndarray:
 
     listener = kb.Listener(on_press=on_press, on_release=on_release)
     listener.start()
-    pressed.wait()                     # bloquea hasta que pulsa ESPACIO
-    print(f"  [●] Grabando...", end="", flush=True)
+
+    print("\n  Mantén ESPACIO y di la frase completa → suelta para inferir")
+    pressed_event.wait()
+    print("  [●] Grabando...", end="", flush=True)
 
     buffer  = []
-    n_pre   = audio_q.qsize()
+    n_pre   = audio_q.qsize()   # chunks previos al press — descartar
     skipped = 0
 
-    with sd.InputStream(samplerate=TARGET_SR, channels=1, dtype="float32",
-                        blocksize=chunk_samples, device=device_idx,
-                        callback=audio_cb):
+    with sd.InputStream(
+        samplerate=TARGET_SR, channels=1, dtype="float32",
+        blocksize=chunk_samples, device=device_idx, callback=audio_cb,
+    ):
         while True:
             try:
                 chunk = audio_q.get(timeout=0.08)
@@ -227,12 +167,13 @@ def record_word_ptt(device_idx, word_num: int) -> np.ndarray:
                 continue
 
             buffer.append(chunk)
+
             released = release_event.is_set()
             if (released and len(buffer) >= min_record_chunks) or len(buffer) >= max_chunks:
                 break
 
         # Capturar consonante final tras soltar
-        time.sleep(0.12)
+        time.sleep(0.10)
         while not audio_q.empty():
             try:
                 buffer.append(audio_q.get_nowait())
@@ -240,80 +181,56 @@ def record_word_ptt(device_idx, word_num: int) -> np.ndarray:
                 break
 
     listener.stop()
-    print(" ✓")
-    return np.concatenate(buffer) if buffer else np.zeros(int(TARGET_SR * 0.5), dtype=np.float32)
+    dur = len(buffer) * CHUNK_DURATION_S
+    print(f" {dur:.2f}s ✓")
 
-
-# ── Trim de silencio ──────────────────────────────────────────────────────────
-
-def trim_silence(audio: np.ndarray) -> np.ndarray:
-    chunk = int(TARGET_SR * CHUNK_DURATION_S)
-    if len(audio) < chunk * 2:
-        return audio
-    rms_vals = [float(np.sqrt(np.mean(audio[i:i+chunk]**2)))
-                for i in range(0, len(audio) - chunk, chunk)]
-    if not rms_vals:
-        return audio
-    noise_floor = min(rms_vals)
-    threshold   = max(noise_floor * 4.0, 0.008)
-
-    start_chunk, end_chunk = 0, len(rms_vals)
-    for i, r in enumerate(rms_vals):
-        if r >= threshold:
-            start_chunk = i
-            break
-    for i in range(len(rms_vals) - 1, -1, -1):
-        if rms_vals[i] >= threshold * 0.6:
-            end_chunk = i + 2
-            break
-
-    start   = max(0, start_chunk * chunk)
-    end     = min(len(audio), end_chunk * chunk)
-    trimmed = audio[start:end]
-    return trimmed if len(trimmed) >= chunk * 2 else audio
+    return (
+        np.concatenate(buffer)
+        if buffer
+        else np.zeros(int(TARGET_SR * 0.5), dtype=np.float32)
+    )
 
 
 # ── Loop principal ────────────────────────────────────────────────────────────
 
-def run(args, voice_model, gru_model, emb_store, sender):
+def run(args, model: VoiceGRU, sender: UDPSender) -> None:
     min_conf = args.confidence
 
     print(f"\n[compound] Clases compuestas ({NUM_COMPOUND}):")
     for i, cls in enumerate(COMPOUND_CLASSES):
         print(f"  {i+1}. {cls}")
-    print(f"\n[compound] Confianza mínima: {min_conf:.0%}")
-    print(f"[compound] Delay entre comandos: {args.delay}s")
+    print(f"\n[compound] Confianza mínima : {min_conf:.0%}")
+    print(f"[compound] Delay entre cmds : {args.delay}s")
+    print(f"[compound] Ventana máxima   : {MAX_RECORD_S}s")
     if args.dry_run:
-        print("[compound] MODO PRUEBA — no se envían comandos al ESP32")
-    print("\n" + "─" * 52)
-    print("Instrucciones:")
-    print("  1. Pulsa ESPACIO y di la primera palabra, suelta.")
-    print("  2. Pulsa ESPACIO y di la segunda palabra, suelta.")
-    print("  → El GRU predice y ejecuta el comando compuesto.")
-    print("  Ctrl+C para salir.")
-    print("─" * 52)
+        print("[compound] MODO PRUEBA — sin envío al ESP32")
+    print("\n" + "═" * 52)
+    print("  Mantén ESPACIO → di la frase completa → suelta")
+    print("  Ctrl+C para salir")
+    print("═" * 52)
 
     while True:
         try:
-            # ── Palabra 1 ─────────────────────────────────────────────────────
-            audio1 = trim_silence(record_word_ptt(args.microphone, 1))
-            word1, conf1, emb1 = infer_word(voice_model, emb_store, audio1, DEVICE_STR)
-            print(f"  → Palabra 1: {word1:<14} ({conf1:.0%})")
+            # ── Captura ───────────────────────────────────────────────────────
+            audio = record_ptt(args.microphone)
 
-            # ── Palabra 2 ─────────────────────────────────────────────────────
-            audio2 = trim_silence(record_word_ptt(args.microphone, 2))
-            word2, conf2, emb2 = infer_word(voice_model, emb_store, audio2, DEVICE_STR)
-            print(f"  → Palabra 2: {word2:<14} ({conf2:.0%})")
-
-            # ── GRU ───────────────────────────────────────────────────────────
-            compound, conf_gru = infer_compound(gru_model, emb1, emb2, DEVICE_STR)
-            print(f"\n  ► COMANDO GRU: {compound}  ({conf_gru:.0%})")
+            # ── Inferencia GRU ────────────────────────────────────────────────
+            compound, conf, probs = infer(model, audio, DEVICE_STR)
 
             if args.verbose:
                 print()
+                for i, cls in enumerate(COMPOUND_CLASSES):
+                    p   = float(probs[i])
+                    bar = "█" * int(p * 30)
+                    pad = "░" * (30 - len(bar))
+                    mark = " ◄" if cls == compound else ""
+                    print(f"  {cls:<22} {bar}{pad} {p:5.1%}{mark}")
+                print()
 
-            if conf_gru < min_conf:
-                print(f"  ✗ Confianza insuficiente ({conf_gru:.0%} < {min_conf:.0%}) — ignorado")
+            print(f"  ► GRU: {compound}  ({conf:.0%})")
+
+            if conf < min_conf:
+                print(f"  ✗ Confianza insuficiente — ignorado")
                 print("─" * 52)
                 continue
 
@@ -324,16 +241,15 @@ def run(args, voice_model, gru_model, emb_store, sender):
                 continue
 
             byte1, byte2 = cmd_bytes
+
             if args.dry_run:
-                print(f"  [DRY] UDP byte 1: 0x{byte1:02X}  →  {compound.split('_')[0]}")
-                print(f"  [DRY] (espera {args.delay}s)")
-                print(f"  [DRY] UDP byte 2: 0x{byte2:02X}  →  {compound.split('_')[1] if '_' in compound else ''}")
+                print(f"  [DRY] → 0x{byte1:02X}  (espera {args.delay}s)  → 0x{byte2:02X}")
             else:
-                sender.send(byte1)
-                print(f"  ✓ UDP: 0x{byte1:02X} enviado")
+                ok1 = sender.send(byte1)
+                print(f"  ✓ CMD1: 0x{byte1:02X}  {'OK' if ok1 else 'ERR'}")
                 time.sleep(args.delay)
-                sender.send(byte2)
-                print(f"  ✓ UDP: 0x{byte2:02X} enviado")
+                ok2 = sender.send(byte2)
+                print(f"  ✓ CMD2: 0x{byte2:02X}  {'OK' if ok2 else 'ERR'}")
 
             print("─" * 52)
 
@@ -343,14 +259,16 @@ def run(args, voice_model, gru_model, emb_store, sender):
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 
-def main():
-    parser = argparse.ArgumentParser(description="Control compuesto por voz — 2 palabras + GRU")
-    parser.add_argument("--microphone",  type=int,   default=None)
-    parser.add_argument("--confidence",  type=float, default=MIN_CONFIDENCE)
-    parser.add_argument("--delay",       type=float, default=0.5,
-                        help="Segundos entre el cmd 1 y cmd 2 (default: 0.5)")
-    parser.add_argument("--dry-run",     action="store_true")
-    parser.add_argument("--verbose",     action="store_true")
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Comandos compuestos por voz — 1 PTT → GRU → ESP32"
+    )
+    parser.add_argument("--microphone",   type=int,   default=None)
+    parser.add_argument("--confidence",   type=float, default=MIN_CONFIDENCE)
+    parser.add_argument("--delay",        type=float, default=0.5,
+                        help="Segundos entre CMD1 y CMD2 (default: 0.5)")
+    parser.add_argument("--dry-run",      action="store_true")
+    parser.add_argument("--verbose",      action="store_true")
     parser.add_argument("--list-devices", action="store_true")
     args = parser.parse_args()
 
@@ -359,15 +277,12 @@ def main():
         return
 
     print(f"Dispositivo PyTorch: {DEVICE_STR}")
-    voice_model = load_voice_model(DEVICE_STR)
-    gru_model   = load_gru_model(DEVICE_STR)
-    emb_store, handle = make_embedding_hook(voice_model)
+    model  = load_gru_model(DEVICE_STR)
     sender = UDPSender()
 
     try:
-        run(args, voice_model, gru_model, emb_store, sender)
+        run(args, model, sender)
     finally:
-        handle.remove()
         if not args.dry_run:
             sender.send(CMD_STOP)
             time.sleep(0.1)
