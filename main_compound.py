@@ -243,13 +243,16 @@ def run(args, model: VoiceGRU, sender: UDPSender) -> None:
             byte1, byte2 = cmd_bytes
 
             if args.dry_run:
-                print(f"  [DRY] → 0x{byte1:02X}  (espera {args.delay}s)  → 0x{byte2:02X}")
+                print(f"  [DRY] → 0x{byte1:02X}  ({args.delay}s)  → 0x{byte2:02X}  ({args.delay}s)  → STOP")
             else:
                 ok1 = sender.send(byte1)
                 print(f"  ✓ CMD1: 0x{byte1:02X}  {'OK' if ok1 else 'ERR'}")
                 time.sleep(args.delay)
                 ok2 = sender.send(byte2)
                 print(f"  ✓ CMD2: 0x{byte2:02X}  {'OK' if ok2 else 'ERR'}")
+                time.sleep(args.delay)
+                sender.send(CMD_STOP)
+                print(f"  ✓ STOP: 0x00")
 
             print("─" * 52)
 
@@ -265,8 +268,8 @@ def main() -> None:
     )
     parser.add_argument("--microphone",   type=int,   default=None)
     parser.add_argument("--confidence",   type=float, default=MIN_CONFIDENCE)
-    parser.add_argument("--delay",        type=float, default=0.5,
-                        help="Segundos entre CMD1 y CMD2 (default: 0.5)")
+    parser.add_argument("--delay",        type=float, default=1.0,
+                        help="Segundos de duración por movimiento (default: 1.0)")
     parser.add_argument("--dry-run",      action="store_true")
     parser.add_argument("--verbose",      action="store_true")
     parser.add_argument("--list-devices", action="store_true")
