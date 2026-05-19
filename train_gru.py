@@ -108,8 +108,8 @@ class CompoundAudioDataset(Dataset):
             if a1.ndim > 1: a1 = a1.mean(axis=1)
             if a2.ndim > 1: a2 = a2.mean(axis=1)
 
-            # Silencio aleatorio entre palabras (50–200 ms)
-            gap_samples = int(sr1 * rng.integers(50, 201) / 1000)
+            # Silencio aleatorio entre palabras (0–300 ms, incluye palabras pegadas)
+            gap_samples = int(sr1 * rng.integers(0, 301) / 1000)
             silence     = np.zeros(gap_samples, dtype=np.float32)
             compound    = np.concatenate([a1, silence, a2])
 
