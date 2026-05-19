@@ -16,6 +16,12 @@ dependencies = [
     "jupyter>=1.0.0",
     "ipykernel>=6.0.0",
     "ipywidgets>=8.0.0",
+    "piper-tts>=1.4.2",
+    "sounddevice>=0.5.5",
+    "soundfile>=0.13.1",
+    "scipy>=1.15.3",
+    "pynput>=1.7.0",
+    "kokoro-onnx>=0.5.0",
 ]
 
 [build-system]
@@ -26,4 +32,6 @@ build-backend = "hatchling.build"
 packages = ["."]
 
 [tool.uv]
-dev-dependencies = []
+dev-dependencies = [
+    "python-docx>=1.2.0",
+]
