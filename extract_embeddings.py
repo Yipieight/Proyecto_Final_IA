@@ -33,7 +33,8 @@ DEVICE         = (
 
 def load_model(device: str) -> VoiceCNN:
     model = VoiceCNN()
-    state = torch.load(MODEL_PATH, map_location=device, weights_only=True)
+    ckpt = torch.load(MODEL_PATH, map_location=device, weights_only=False)
+    state = ckpt["model_state"] if isinstance(ckpt, dict) and "model_state" in ckpt else ckpt
     model.load_state_dict(state)
     model.to(device)
     model.eval()
