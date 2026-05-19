@@ -27,6 +27,10 @@ __pycache__/
 # Firmware ESP32 (no subir a GitHub)
 esp32_firmware/
 
+# Embeddings generados (recreables con extract_embeddings.py)
+embeddings/
+
 # Temporales
 *.log
 *.tmp
+~$*

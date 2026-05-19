@@ -149,7 +149,8 @@ def infer(model, audio: np.ndarray, device) -> tuple[str, float, np.ndarray]:
 
 
 def _dispatch(cls_name: str, confidence: float, probs: np.ndarray,
-              sender: UDPSender, dry_run: bool, verbose: bool) -> None:
+              sender: UDPSender, dry_run: bool, verbose: bool,
+              delay: float = 0.0) -> None:
 
     if verbose:
         print()  # nueva línea tras el "Grabando..."
@@ -172,19 +173,25 @@ def _dispatch(cls_name: str, confidence: float, probs: np.ndarray,
     cmd_byte = VOICE_CMD_MAP.get(cls_name, CMD_STOP)
     if dry_run:
         if not verbose:
-            print(f" → DETECTADO: {cls_name}  ({confidence:.0%})")
+            suffix = f"  (auto-stop en {delay}s)" if delay > 0 and cmd_byte != CMD_STOP else ""
+            print(f" → DETECTADO: {cls_name}  ({confidence:.0%}){suffix}")
     else:
         sender.send(cmd_byte)
         wifi = "OK " if sender.wifi_ok else "ERR"
         if not verbose:
-            print(f" → {cls_name}  ({confidence:.0%})  UDP:0x{cmd_byte:02X}  WiFi:{wifi}")
+            suffix = f"  → STOP en {delay}s" if delay > 0 and cmd_byte != CMD_STOP else ""
+            print(f" → {cls_name}  ({confidence:.0%})  UDP:0x{cmd_byte:02X}  WiFi:{wifi}{suffix}")
+        # Auto-stop: detiene el motor tras delay segundos (no aplica a DETENER)
+        if delay > 0 and cmd_byte != CMD_STOP:
+            time.sleep(delay)
+            sender.send(CMD_STOP)
 
 
 # ── Modo VAD (umbral adaptativo) ──────────────────────────────────────────────
 
 def run_vad(vad_threshold: float, device_idx, dry_run: bool, verbose: bool,
             model, torch_device, sender: UDPSender,
-            no_vad: bool = False) -> None:
+            no_vad: bool = False, delay: float = 0.0) -> None:
     chunk_samples  = int(TARGET_SR * CHUNK_DURATION_S)
     silence_chunks = int(SILENCE_DURATION_S / CHUNK_DURATION_S)
     max_chunks     = int(MAX_UTTERANCE_S / CHUNK_DURATION_S)
@@ -223,7 +230,7 @@ def run_vad(vad_threshold: float, device_idx, dry_run: bool, verbose: bool,
                     if len(buffer) >= max_chunks:
                         audio_data            = np.concatenate(buffer)
                         cls_name, conf, probs = infer(model, audio_data, torch_device)
-                        _dispatch(cls_name, conf, probs, sender, dry_run, verbose)
+                        _dispatch(cls_name, conf, probs, sender, dry_run, verbose, delay)
                         buffer = []
                     continue
 
@@ -247,7 +254,7 @@ def run_vad(vad_threshold: float, device_idx, dry_run: bool, verbose: bool,
                     if silent_count >= silence_chunks or len(buffer) >= max_chunks:
                         audio_data            = np.concatenate(buffer)
                         cls_name, conf, probs = infer(model, audio_data, torch_device)
-                        _dispatch(cls_name, conf, probs, sender, dry_run, verbose)
+                        _dispatch(cls_name, conf, probs, sender, dry_run, verbose, delay)
                         recording    = False
                         buffer       = []
                         silent_count = 0
@@ -259,7 +266,7 @@ def run_vad(vad_threshold: float, device_idx, dry_run: bool, verbose: bool,
 # ── Modo PTT (push-to-talk con ESPACIO) ───────────────────────────────────────
 
 def run_ptt(device_idx, dry_run: bool, verbose: bool,
-            model, torch_device, sender: UDPSender) -> None:
+            model, torch_device, sender: UDPSender, delay: float = 0.0) -> None:
     from pynput import keyboard as kb
 
     chunk_samples     = int(TARGET_SR * CHUNK_DURATION_S)
@@ -364,6 +371,8 @@ def main() -> None:
                         help="Mostrar barras de probabilidad por clase")
     parser.add_argument("--dry-run",       action="store_true",
                         help="Mostrar predicciones sin enviar al ESP32")
+    parser.add_argument("--delay",         type=float, default=0.0,
+                        help="Segundos activo por comando, luego STOP automático (default: 0 = continuo)")
     parser.add_argument("--no-vad",        action="store_true",
                         help="Desactivar detección de voz — predice continuamente cada 3s")
     parser.add_argument("--list-devices",  action="store_true",
@@ -386,10 +395,10 @@ def main() -> None:
     try:
         if args.ptt:
             run_ptt(args.microphone, args.dry_run, args.verbose,
-                    model, torch_device, sender)
+                    model, torch_device, sender, delay=args.delay)
         else:
             run_vad(args.threshold, args.microphone, args.dry_run, args.verbose,
-                    model, torch_device, sender, no_vad=args.no_vad)
+                    model, torch_device, sender, no_vad=args.no_vad, delay=args.delay)
     finally:
         if not args.dry_run:
             print("\n[voice] Enviando STOP al ESP32...")
