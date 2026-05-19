@@ -44,13 +44,10 @@ MIN_CONFIDENCE   = 0.75
 
 # Tabla lookup: (palabra1, palabra2) → (byte_cmd1, byte_cmd2)
 LOOKUP: dict[tuple[str, str], tuple[int, int]] = {
-    ("ADELANTE",  "IZQUIERDA"): (0x01, 0x02),
-    ("ADELANTE",  "DERECHA"):   (0x01, 0x03),
-    ("ADELANTE",  "DETENER"):   (0x01, 0x00),
-    ("GIRO_IZQ",  "ADELANTE"):  (0x04, 0x01),
-    ("GIRO_DER",  "ADELANTE"):  (0x05, 0x01),
-    ("IZQUIERDA", "ADELANTE"):  (0x02, 0x01),
-    ("DERECHA",   "ADELANTE"):  (0x03, 0x01),
+    ("ADELANTE", "IZQUIERDA"): (0x01, 0x02),
+    ("DERECHA",  "ADELANTE"):  (0x03, 0x01),
+    ("GIRO_IZQ", "ADELANTE"):  (0x04, 0x01),
+    ("GIRO_DER", "ADELANTE"):  (0x05, 0x01),
 }
 
 DEVICE_STR = (

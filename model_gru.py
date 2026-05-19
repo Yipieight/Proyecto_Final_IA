@@ -34,13 +34,10 @@ T_MAX = 300   # 3 s a 10 ms por frame (HOP=160 a 16kHz)
 # ── Definición de clases compuestas ───────────────────────────────────────────
 
 COMPOUND_CLASSES = [
-    "ADELANTE_IZQUIERDA",
-    "ADELANTE_DERECHA",
-    "ADELANTE_DETENER",
-    "GIRO_IZQ_ADELANTE",
-    "GIRO_DER_ADELANTE",
-    "IZQUIERDA_ADELANTE",
-    "DERECHA_ADELANTE",
+    "ADELANTE_IZQUIERDA",   # avanza → gira izq
+    "DERECHA_ADELANTE",     # gira der → avanza
+    "GIRO_IZQ_ADELANTE",    # pivote izq → avanza
+    "GIRO_DER_ADELANTE",    # pivote der → avanza
 ]
 
 COMPOUND_CLASS_IDX = {c: i for i, c in enumerate(COMPOUND_CLASSES)}
@@ -49,24 +46,18 @@ NUM_COMPOUND       = len(COMPOUND_CLASSES)
 
 # Par de clases de voz individuales que forman cada comando compuesto
 COMPOUND_WORD_PAIRS = {
-    "ADELANTE_IZQUIERDA": ("ADELANTE",  "IZQUIERDA"),
-    "ADELANTE_DERECHA":   ("ADELANTE",  "DERECHA"),
-    "ADELANTE_DETENER":   ("ADELANTE",  "DETENER"),
-    "GIRO_IZQ_ADELANTE":  ("GIRO_IZQ",  "ADELANTE"),
-    "GIRO_DER_ADELANTE":  ("GIRO_DER",  "ADELANTE"),
-    "IZQUIERDA_ADELANTE": ("IZQUIERDA", "ADELANTE"),
-    "DERECHA_ADELANTE":   ("DERECHA",   "ADELANTE"),
+    "ADELANTE_IZQUIERDA": ("ADELANTE", "IZQUIERDA"),
+    "DERECHA_ADELANTE":   ("DERECHA",  "ADELANTE"),
+    "GIRO_IZQ_ADELANTE":  ("GIRO_IZQ", "ADELANTE"),
+    "GIRO_DER_ADELANTE":  ("GIRO_DER", "ADELANTE"),
 }
 
 # Par de bytes UDP a enviar al ESP32 para cada comando compuesto
 COMPOUND_CMD_BYTES = {
     "ADELANTE_IZQUIERDA": (0x01, 0x02),
-    "ADELANTE_DERECHA":   (0x01, 0x03),
-    "ADELANTE_DETENER":   (0x01, 0x00),
+    "DERECHA_ADELANTE":   (0x03, 0x01),
     "GIRO_IZQ_ADELANTE":  (0x04, 0x01),
     "GIRO_DER_ADELANTE":  (0x05, 0x01),
-    "IZQUIERDA_ADELANTE": (0x02, 0x01),
-    "DERECHA_ADELANTE":   (0x03, 0x01),
 }
 
 
