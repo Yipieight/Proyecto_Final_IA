@@ -52,7 +52,7 @@ UDP (1 byte) → ESP32 (192.168.1.4:9999) → Motores
 
 | Comando | Acción | Byte UDP |
 |---|---|---|
-| DETENER | Para el robot | `0x00` |
+| ALTO | Para el robot | `0x00` |
 | ADELANTE | Avanza recto | `0x01` |
 | IZQUIERDA | Gira izquierda | `0x02` |
 | DERECHA | Gira derecha | `0x03` |

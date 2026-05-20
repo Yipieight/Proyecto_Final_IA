@@ -4,7 +4,7 @@ Constantes globales del módulo de control por voz.
 
 # ── ESP32 — comunicación UDP ──────────────────────────────────────────────────
 # Actualizar ESP32_IP con la IP que aparece en el Serial Monitor al arrancar.
-ESP32_IP   = "192.168.1.4"
+ESP32_IP   = "10.202.170.127"
 ESP32_PORT = 9999
 
 # ── Protocolo UDP (1 byte por comando) ────────────────────────────────────────

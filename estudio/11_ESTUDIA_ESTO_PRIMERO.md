@@ -463,7 +463,7 @@ Para comandos compuestos el silencio de cierre es mayor:
 > [!example] Dónde está en el código
 > **`voice_dataset.py` línea 26**
 > ```python
-> VOICE_CLASSES = ["DETENER", "ADELANTE", "IZQUIERDA", "DERECHA", "GIRO_IZQ", "GIRO_DER"]
+> VOICE_CLASSES = ["ALTO", "ADELANTE", "IZQUIERDA", "DERECHA", "GIRO_IZQ", "GIRO_DER"]
 > ```
 
 ## Por qué TTS y no grabaciones reales

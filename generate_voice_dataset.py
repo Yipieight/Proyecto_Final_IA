@@ -39,6 +39,11 @@ SAMPLES_PER_VOICE = 65    # × 6 voces (3 Piper high + 3 Kokoro) = 390 limpias p
 KOKORO_MODEL  = VOICES_DIR / "kokoro-v1.0.onnx"
 KOKORO_VOICES_BIN = VOICES_DIR / "voices-v1.0.bin"
 KOKORO_VOICES_ES = ["ef_dora", "em_alex", "em_santa"]   # ♀ + 2♂ español
+
+EDGE_VOICES = [
+    {"name": "gt_andres", "voice_id": "es-GT-AndresNeural"},   # Guatemala ♂ — acento centroamericano
+    {"name": "mx_dalia",  "voice_id": "es-MX-DaliaNeural"},    # México ♀ — acento mexicano claro
+]
 SNR_LEVELS        = [20, 10, 5]   # dB (suave, moderado, fuerte)
 
 BASE_HF = "https://huggingface.co/rhasspy/piper-voices/resolve/main"
@@ -54,13 +59,6 @@ PIPER_VOICES = [
     },
     # ── México — high quality ─────────────────────────────────────────────────
     {
-        "name":        "ald",              # masculina, acento mexicano
-        "model_path":  VOICES_DIR / "es_MX-ald-medium.onnx",
-        "config_path": VOICES_DIR / "es_MX-ald-medium.onnx.json",
-        "model_url":   f"{BASE_HF}/es/es_MX/ald/medium/es_MX-ald-medium.onnx",
-        "config_url":  f"{BASE_HF}/es/es_MX/ald/medium/es_MX-ald-medium.onnx.json",
-    },
-    {
         "name":        "claude_mx",        # masculina, alta calidad, acento mexicano
         "model_path":  VOICES_DIR / "es_MX-claude-high.onnx",
         "config_path": VOICES_DIR / "es_MX-claude-high.onnx.json",
@@ -75,15 +73,15 @@ PIPER_VOICES = [
 # ── Palabras por clase (3 por clase, fonéticamente distintas) ─────────────────
 
 VOICE_CLASSES = {
-    "DETENER":   ["detener"],
+    "ALTO":      ["alto"],
     "ADELANTE":  ["adelante"],
     "IZQUIERDA": ["izquierda"],
     "DERECHA":   ["derecha"],
     # Para los comandos de 2 palabras se añaden variantes fonéticas naturales:
     # el TTS los sintetiza con ritmos distintos (sustantivo vs imperativo)
     # lo que amplía la variabilidad temporal y mejora el reconocimiento en vivo.
-    "GIRO_IZQ":  ["giro izquierda", "gira izquierda", "giro a la izquierda"],
-    "GIRO_DER":  ["giro derecha",   "gira derecha",   "giro a la derecha"],
+    "GIRO_IZQ":  ["giro a la izquierda"],
+    "GIRO_DER":  ["giro a la derecha"],
 }
 
 
@@ -139,6 +137,31 @@ def _kokoro_synth_fn(kokoro, voice_name: str, lang: str = "es"):
         if sr != TARGET_SR:
             samples = resample(samples, int(len(samples) * TARGET_SR / sr)).astype(np.float32)
         return samples
+    return synth
+
+
+def _edge_synth_fn(voice_name: str):
+    """Devuelve función synth(text)->ndarray para una voz Edge-TTS (Microsoft Neural)."""
+    import asyncio, tempfile, subprocess, os
+    def synth(text: str) -> np.ndarray:
+        import edge_tts
+        async def _run():
+            with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tmp:
+                tmp_path = tmp.name
+            communicate = edge_tts.Communicate(text, voice_name)
+            await communicate.save(tmp_path)
+            return tmp_path
+        tmp_mp3 = asyncio.run(_run())
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp_wav:
+            wav_path = tmp_wav.name
+        subprocess.run(["ffmpeg", "-y", "-i", tmp_mp3, "-ar", str(TARGET_SR), "-ac", "1", wav_path],
+                       capture_output=True)
+        os.unlink(tmp_mp3)
+        audio, sr = sf.read(wav_path, dtype="float32")
+        os.unlink(wav_path)
+        if audio.ndim > 1:
+            audio = audio.mean(axis=1)
+        return audio.astype(np.float32)
     return synth
 
 
@@ -437,6 +460,16 @@ def generate_dataset(only: str | None = None) -> None:
             print(f"  ✗ Kokoro no disponible: {e}")
     else:
         print("  ✗ Modelos Kokoro no encontrados en voices/ — solo se usará Piper")
+
+    # ── Fase 1c: cargar voces Edge-TTS (Microsoft Neural) ────────────────────
+    print("Cargando voces Edge-TTS (Microsoft Neural)...")
+    for cfg in EDGE_VOICES:
+        try:
+            fn = _edge_synth_fn(cfg["voice_id"])
+            loaded_voices.append((f"edge_{cfg['name']}", fn))
+            print(f"  ✓ edge/{cfg['name']}")
+        except Exception as e:
+            print(f"  ✗ edge/{cfg['name']}: {e}")
 
     if not loaded_voices:
         raise RuntimeError("No se pudo cargar ninguna voz.")
