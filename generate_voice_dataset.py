@@ -3,18 +3,21 @@
 Genera dataset de audio para control por voz.
 
 Estrategia:
-  - 5 voces Piper medium/high (ES/AR/MX) + 3 voces Kokoro ONNX (ES) = 8 voces de alta calidad
-  - Augmentación por muestra: velocidad (4 niveles), volumen, pitch (grave/agudo) = 9 variantes
+  - 3 voces Piper high (AR/MX) + 3 voces Kokoro ONNX (ES) = 6 voces de alta calidad
+    (se eliminaron davefx-medium y sharvard-medium: robóticas y muy similares entre sí)
+  - Variantes fonéticas para comandos de 2 palabras (giro izquierda / gira izquierda)
+  - Augmentación por muestra: velocidad (4 niveles), volumen, pitch (grave/agudo) = 13 variantes
   - 7 escenarios de ruido: aula, multitud, lluvia, viento, tráfico, rosa, blanco
   - Ruido a 3 niveles SNR (20/10/5 dB)
   - Reverb sintético (eco de sala)
   - Filtro de micrófono (300–3400 Hz) — simula mic barato o teléfono
-  - Augmentación compuesta: reverb+ruido y mic+ruido simultáneos
+  - Augmentación compuesta: reverb+ruido, mic+ruido, clipping, EQ, doble ruido, eco, lugar público
 
 Uso:
     uv run python generate_voice_dataset.py
+    uv run python generate_voice_dataset.py --only GIRO_IZQ
 
-Dataset resultante: ~5400 muestras/clase, ~32400 total.
+Dataset resultante: ~5500 muestras/clase, ~33000 total.
 """
 
 import os
@@ -31,7 +34,7 @@ from scipy.signal import resample, butter, sosfilt
 VOICES_DIR        = Path("voices")
 DATA_VOICE        = Path("data") / "voice"
 TARGET_SR         = 16000
-SAMPLES_PER_VOICE = 45    # × 8 voces (5 Piper + 3 Kokoro) = 360 limpias por clase
+SAMPLES_PER_VOICE = 65    # × 6 voces (3 Piper high + 3 Kokoro) = 390 limpias por clase
 
 KOKORO_MODEL  = VOICES_DIR / "kokoro-v1.0.onnx"
 KOKORO_VOICES_BIN = VOICES_DIR / "voices-v1.0.bin"
@@ -41,44 +44,32 @@ SNR_LEVELS        = [20, 10, 5]   # dB (suave, moderado, fuerte)
 BASE_HF = "https://huggingface.co/rhasspy/piper-voices/resolve/main"
 
 PIPER_VOICES = [
-    # ── España ────────────────────────────────────────────────────────────────
+    # ── Argentina — high quality ───────────────────────────────────────────────
     {
-        "name":        "davefx",
-        "model_path":  VOICES_DIR / "es_ES-davefx-medium.onnx",
-        "config_path": VOICES_DIR / "es_ES-davefx-medium.onnx.json",
-        "model_url":   f"{BASE_HF}/es/es_ES/davefx/medium/es_ES-davefx-medium.onnx",
-        "config_url":  f"{BASE_HF}/es/es_ES/davefx/medium/es_ES-davefx-medium.onnx.json",
-    },
-    {
-        "name":        "sharvard",
-        "model_path":  VOICES_DIR / "es_ES-sharvard-medium.onnx",
-        "config_path": VOICES_DIR / "es_ES-sharvard-medium.onnx.json",
-        "model_url":   f"{BASE_HF}/es/es_ES/sharvard/medium/es_ES-sharvard-medium.onnx",
-        "config_url":  f"{BASE_HF}/es/es_ES/sharvard/medium/es_ES-sharvard-medium.onnx.json",
-    },
-    # ── Argentina ─────────────────────────────────────────────────────────────
-    {
-        "name":        "daniela",          # Argentina — voz femenina alta calidad
+        "name":        "daniela",          # femenina, alta calidad (la mejor Piper ES)
         "model_path":  VOICES_DIR / "es_AR-daniela-high.onnx",
         "config_path": VOICES_DIR / "es_AR-daniela-high.onnx.json",
         "model_url":   f"{BASE_HF}/es/es_AR/daniela/high/es_AR-daniela-high.onnx",
         "config_url":  f"{BASE_HF}/es/es_AR/daniela/high/es_AR-daniela-high.onnx.json",
     },
-    # ── México ────────────────────────────────────────────────────────────────
+    # ── México — high quality ─────────────────────────────────────────────────
     {
-        "name":        "ald",              # México — voz masculina
+        "name":        "ald",              # masculina, acento mexicano
         "model_path":  VOICES_DIR / "es_MX-ald-medium.onnx",
         "config_path": VOICES_DIR / "es_MX-ald-medium.onnx.json",
         "model_url":   f"{BASE_HF}/es/es_MX/ald/medium/es_MX-ald-medium.onnx",
         "config_url":  f"{BASE_HF}/es/es_MX/ald/medium/es_MX-ald-medium.onnx.json",
     },
     {
-        "name":        "claude_mx",        # México — voz alta calidad
+        "name":        "claude_mx",        # masculina, alta calidad, acento mexicano
         "model_path":  VOICES_DIR / "es_MX-claude-high.onnx",
         "config_path": VOICES_DIR / "es_MX-claude-high.onnx.json",
         "model_url":   f"{BASE_HF}/es/es_MX/claude/high/es_MX-claude-high.onnx",
         "config_url":  f"{BASE_HF}/es/es_MX/claude/high/es_MX-claude-high.onnx.json",
     },
+    # Voces eliminadas: davefx-medium y sharvard-medium (España)
+    # Motivo: calidad medium, sonido robótico/monótono, ambas muy similares entre sí.
+    # Reemplazadas aumentando SAMPLES_PER_VOICE de 45 → 65 en las 3 voces restantes.
 ]
 
 # ── Palabras por clase (3 por clase, fonéticamente distintas) ─────────────────
@@ -88,8 +79,11 @@ VOICE_CLASSES = {
     "ADELANTE":  ["adelante"],
     "IZQUIERDA": ["izquierda"],
     "DERECHA":   ["derecha"],
-    "GIRO_IZQ":  ["giro izquierda"],
-    "GIRO_DER":  ["giro derecha"],
+    # Para los comandos de 2 palabras se añaden variantes fonéticas naturales:
+    # el TTS los sintetiza con ritmos distintos (sustantivo vs imperativo)
+    # lo que amplía la variabilidad temporal y mejora el reconocimiento en vivo.
+    "GIRO_IZQ":  ["giro izquierda", "gira izquierda", "giro a la izquierda"],
+    "GIRO_DER":  ["giro derecha",   "gira derecha",   "giro a la derecha"],
 }
 
 
