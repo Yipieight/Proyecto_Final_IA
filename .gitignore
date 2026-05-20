@@ -4,12 +4,10 @@ data/
 # Modelos TTS (Piper + Kokoro) — re-descargables
 voices/
 
-# Modelos entrenados
-models/*.pth
-models/*.pt
+# Modelo de navegación (no pertenece a este módulo)
+models/nav_model.pth
 
-# Métricas generadas
-metrics/
+# voice_model.pth y gru_model.pth sí se suben (< 15 MB total)
 
 # Entorno virtual
 .venv/
